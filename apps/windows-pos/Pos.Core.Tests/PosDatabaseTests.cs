@@ -17,6 +17,9 @@ public sealed class PosDatabaseTests
         Assert.All(products, p => Assert.Equal("TND", p.Currency));
         Assert.All(products, p => Assert.True(p.PriceMinor > 0));
         Assert.Equal("p-espresso", products[0].Id);
+        Assert.Equal("Café express", products[0].Name);
+        Assert.Equal("bar", products[0].StationId);
+        Assert.Equal("kitchen", products.Single(p => p.Id == "p-pizza").StationId);
     }
 
     [Fact]

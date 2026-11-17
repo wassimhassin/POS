@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Pos.Core.Catalog;
 using Pos.Core.Orders;
+using Pos.Core.Printing;
 
 namespace Pos.Core.Bridge;
 
@@ -35,10 +36,11 @@ public sealed partial class BridgeDispatcher
     private readonly ILogger _logger;
     private readonly ILogger _uiLogger;
 
-    public BridgeDispatcher(ProductRepository products, DraftOrderRepository drafts, ILoggerFactory loggerFactory)
+    public BridgeDispatcher(ProductRepository products, DraftOrderRepository drafts, PrintService printing, ILoggerFactory loggerFactory)
     {
         ArgumentNullException.ThrowIfNull(products);
         ArgumentNullException.ThrowIfNull(drafts);
+        ArgumentNullException.ThrowIfNull(printing);
         ArgumentNullException.ThrowIfNull(loggerFactory);
         _logger = loggerFactory.CreateLogger<BridgeDispatcher>();
         _uiLogger = loggerFactory.CreateLogger("Pos.Ui");
@@ -69,6 +71,51 @@ public sealed partial class BridgeDispatcher
             {
                 LogClient(Read<ClientLogPayload>(p));
                 return new { };
+            },
+
+            // --- Phase 1.2 printing ---
+            ["printers.list"] = p =>
+            {
+                Read<EmptyPayload>(p);
+                return printing.ListPrinters();
+            },
+            ["print.destinations.list"] = p =>
+            {
+                Read<EmptyPayload>(p);
+                return printing.ListDestinations();
+            },
+            ["print.destinations.update"] = p =>
+            {
+                var req = Read<DestinationUpdatePayload>(p);
+                return printing.UpdateDestination(req.Id, req.PrinterName, req.PaperWidthMm);
+            },
+            ["routing.update"] = p =>
+            {
+                var req = Read<RoutingUpdatePayload>(p);
+                printing.SetProductStation(req.ProductId, req.StationId);
+                return new { };
+            },
+            ["print.receipt"] = p =>
+            {
+                var req = Read<OrderPrintPayload>(p);
+                return printing.EnqueueReceipt(req.OrderId, req.ConfirmDuplicate);
+            },
+            ["print.tickets"] = p =>
+            {
+                var req = Read<OrderPrintPayload>(p);
+                return printing.EnqueueStationTickets(req.OrderId, req.ConfirmDuplicate);
+            },
+            ["print.jobs.list"] = p =>
+            {
+                Read<EmptyPayload>(p);
+                return printing.ListJobs();
+            },
+            ["print.jobs.preview"] = p => printing.Preview(Read<JobPayload>(p).JobId),
+            ["print.jobs.retry"] = p => printing.Retry(Read<JobPayload>(p).JobId),
+            ["print.jobs.reprint"] = p =>
+            {
+                var req = Read<ReprintPayload>(p);
+                return printing.Reprint(req.JobId, req.ConfirmDuplicate);
             },
         };
     }
@@ -118,7 +165,7 @@ public sealed partial class BridgeDispatcher
             var requestedType = typeElement.GetString()!;
             if (!_handlers.TryGetValue(requestedType, out var handler))
             {
-                throw new BridgeException("unknown_command", "Commande non autorisÃ©e.");
+                throw new BridgeException("unknown_command", "Commande non autorisée.");
             }
 
             type = requestedType;
@@ -167,11 +214,11 @@ public sealed partial class BridgeDispatcher
     {
         try
         {
-            return payload.Deserialize<T>(JsonOptions) ?? throw new BridgeException("bad_request", "ParamÃ¨tres invalides.");
+            return payload.Deserialize<T>(JsonOptions) ?? throw new BridgeException("bad_request", "Paramètres invalides.");
         }
         catch (JsonException ex)
         {
-            throw new BridgeException("bad_request", "ParamÃ¨tres invalides.", ex);
+            throw new BridgeException("bad_request", "Paramètres invalides.", ex);
         }
     }
 
@@ -222,6 +269,16 @@ public sealed partial class BridgeDispatcher
     private sealed record DraftClearPayload(string OrderId);
 
     private sealed record ClientLogPayload(string Level, string Message, string? Detail = null);
+
+    private sealed record DestinationUpdatePayload(string Id, string? PrinterName, int PaperWidthMm);
+
+    private sealed record RoutingUpdatePayload(string ProductId, string? StationId);
+
+    private sealed record OrderPrintPayload(string OrderId, bool ConfirmDuplicate);
+
+    private sealed record JobPayload(string JobId);
+
+    private sealed record ReprintPayload(string JobId, bool ConfirmDuplicate);
 }
 
 public sealed class BridgeException : Exception

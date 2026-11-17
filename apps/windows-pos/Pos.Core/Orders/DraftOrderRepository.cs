@@ -37,6 +37,14 @@ public sealed class DraftOrderRepository(PosDatabase database, TimeProvider? tim
         return id is null ? null : Load(connection, null, id);
     }
 
+    /// <summary>Returns the draft with the given ID, or null.</summary>
+    public DraftOrder? Get(string orderId)
+    {
+        ValidateOrderId(orderId);
+        using var connection = database.OpenConnection();
+        return Load(connection, null, orderId);
+    }
+
     /// <summary>
     /// Creates (orderId == null) or fully replaces the lines of a draft, atomically.
     /// </summary>

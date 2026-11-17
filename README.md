@@ -1,11 +1,12 @@
-# SaaS POS — Phase 1 technical prototype
+# SaaS POS — Phase 1 / 1.2 technical prototype
 
 A minimal Windows proof of concept for the future multi-tenant café-restaurant POS. It shows that a
 **.NET 10 WPF + WebView2** shell can host a **React/TypeScript/Vite/Tailwind** touchscreen UI, talk to it
 through a narrow, validated bridge, and persist data in **SQLite** across restarts.
 
 > This is a feasibility spike, not the production POS. No cloud backend, authentication, tenants,
-> subscriptions, payments or printing. See `docs/` for the full specifications.
+> subscriptions, payments, cloud sync or LAN gateway. Phase 1.2 adds a thermal-printing proof of
+> concept (see [Printing](#printing-phase-12)). See `docs/` for the full specifications.
 
 ## Layout
 
@@ -54,6 +55,15 @@ dotnet build PosSaaS.slnx                                          # copies dist
 npm test --prefix apps/pos-web                                     # Vitest (cart, money, bridge parsing)
 dotnet test PosSaaS.slnx                                           # xUnit
 node tests/e2e/restart-persistence.mjs                             # real app, 4 launches
+node tests/e2e/print-queue.mjs                                     # real app + real spooler, missing printer, restart
+node tests/e2e/release-no-remote-debugging.mjs                     # Release build ignores WebView2 debug overrides
+```
+
+Optional hardware test (prints one real sample receipt; a person must check the paper):
+
+```powershell
+$env:POS_TEST_PRINTER = "Nom exact de l'imprimante"; $env:POS_TEST_PAPER_MM = "80"
+dotnet test PosSaaS.slnx --filter Hardware_sample_receipt
 ```
 
 ## How it works
@@ -72,11 +82,22 @@ UI   → host  { v: 1, id: "<uuid>", type: "draft.save", payload: { orderId, lin
 host → UI    { id, ok: true, result }   |   { id, ok: false, error: { code, message } }
 ```
 
-Allowlisted commands: `products.list`, `draft.load`, `draft.save`, `draft.clear`, `log.client`.
+Allowlisted commands: `products.list`, `draft.load`, `draft.save`, `draft.clear`, `log.client`, and for
+printing `printers.list`, `print.destinations.list`, `print.destinations.update`, `routing.update`,
+`print.receipt`, `print.tickets`, `print.jobs.list`, `print.jobs.preview`, `print.jobs.retry`,
+`print.jobs.reprint`.
 
 Security measures:
 - Messages are accepted only from the trusted UI origin. Navigation to any other origin, popups and new windows are blocked.
 - No host objects are exposed. DevTools, context menus and browser shortcuts are enabled only in Debug builds.
+- **Remote debugging hardening (Release).** WebView2 also honours the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+  environment variable (e.g. `--remote-debugging-port=9222`, which would let any local process drive the UI and
+  call the bridge) and the other `WEBVIEW2_*` overrides. Release builds remove every `WEBVIEW2_*` variable from
+  the process before WebView2 starts, and log each removal. The machine/user policy
+  `Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments` cannot be overridden by the app, so
+  Release refuses to start if it contains a debugging switch. Regression test:
+  `tests/e2e/release-no-remote-debugging.mjs`. Debug builds deliberately keep these overrides (the E2E tests
+  use them): **never ship a Debug build.**
 - Strict validation: 64 KB size limit, depth limit, unknown envelope or payload fields rejected, strict numeric types, request IDs matched against a pattern.
 - **The UI never sends prices.** C# reads names and prices from SQLite inside the write transaction, and stores them as snapshots on the draft lines.
 - Unexpected exceptions are logged in full but return a generic `internal_error` to the UI.
@@ -95,3 +116,77 @@ Keep both in sync.
 - Structured JSON Lines at `%LOCALAPPDATA%\PosSaaS\logs\pos-YYYYMMDD.jsonl`, one object per event with `ts`, `level`, `category`, `message`, `props` and `exception`.
 - Bridge requests are logged with command, request ID and timing. React errors (from the error boundary, `window.onerror` and unhandled rejections) are forwarded through `log.client`.
 - Native fallbacks: a missing WebView2 runtime or a missing UI build shows a clear French message. A crashed render process is reloaded, and the draft comes back from SQLite.
+
+## Printing (Phase 1.2)
+
+A proof of concept, **not** the production printing system. Code: `Pos.Core/Printing/`, UI: `apps/pos-web/src/printing/`.
+
+### Flow
+
+```text
+UI "Ticket client" / "Bons de préparation"
+  → PrintService: reads the SAVED draft from SQLite (UI sends only the orderId), routes lines,
+    snapshots the ticket source + paper width, inserts print_jobs rows in ONE transaction
+  → PrintWorker (background, FIFO per destination): renders ESC/POS (CP858) → WindowsSpoolerPrinter
+    (winspool: OpenPrinter / StartDocPrinter "RAW" / WritePrinter / EndDocPrinter)
+  → result recorded in print_jobs + print_job_events + JSON log
+```
+
+- **Destinations** (`print_destinations`): `receipt` (Ticket client) and preparation stations
+  (`kitchen` Cuisine, `bar` Bar, `counter` Comptoir). Each has a Windows printer name and a 58 or 80 mm
+  width (32 / 48 columns), editable in the *Impression → Imprimantes* panel (printers discovered with
+  `EnumPrinters`).
+- **Routing**: `products.station_id`, editable in *Impression → Routage*. Items with no station produce no
+  preparation ticket and are reported to the cashier as "non routés".
+- **Money**: integer millimes end to end; formatting `1 234,500` only at render time.
+- Kitchen/bar tickets print item names and quantities in double size, without prices.
+
+### Job states — what each one actually means
+
+| State | Meaning | Automatic action | Operator action |
+|---|---|---|---|
+| `queued` | Not handed to Windows yet (new, or last attempt **definitely** failed before sending) | Retried with backoff 5/15/30/60 s | *Réessayer* (now) |
+| `printing` | An attempt is in progress | — | — |
+| `sent` | **The Windows spooler accepted the job.** This is NOT proof that paper came out | — | *Réimprimer…* (duplicate warning) |
+| `failed` | 5 automatic attempts failed, nothing sent | — | *Réessayer* (safe) |
+| `uncertain` | Failure *after* data started flowing, an exception in the driver, or the app died mid-attempt (`printing` at startup) — the ticket **may or may not** have printed | **Never retried automatically** | Check the printer, then *Réimprimer…* |
+
+Rules:
+- **No exactly-once guarantee.** The system only distinguishes "certainly not sent" (safe to retry) from
+  "sent or maybe sent" (re-printing may duplicate). Every job that may duplicate paper requires an
+  explicit confirmation, and copies are printed with a `DUPLICATA n°X` banner (receipt) or
+  `REIMPRESSION n°X — Ne pas preparer en double` (stations).
+- Sending the receipt/tickets of the same order twice requires confirmation (`duplicate_confirmation_required`).
+- Jobs are rows in SQLite: an unavailable printer, closing the app or a crash never loses them. The
+  printer is resolved at each attempt, so fixing the configuration un-blocks waiting jobs.
+- The UI header shows *Impression — N à vérifier* for `failed` + `uncertain` jobs.
+
+### Verification: simulated vs. real
+
+| What | How | Status |
+|---|---|---|
+| Layout 58/80 mm, wrapping, millimes, duplicate banners, CP858 bytes, ESC/POS init/cut | Unit tests (exact text snapshot) | ✅ automated |
+| Routing, duplicate confirmation, persistence, restart, FIFO, retry limits, uncertain outcomes, crash recovery, migration v1 → v2 | Unit tests with a **simulated** printer (`FakePrinterGateway`) | ✅ automated, **simulated** |
+| Printer discovery, missing printer → `NotSent` | Real Windows spooler, no hardware | ✅ automated, real spooler |
+| RAW job accepted by the spooler | Real spooler → *Microsoft Print to PDF* with an output file | ✅ accepted (`Sent`), but that driver discards RAW data: **proves nothing about paper** |
+| Missing printer through the real app, duplicate dialog, restart | `tests/e2e/print-queue.mjs` | ✅ automated, real spooler |
+| **Paper output on a real thermal printer** | `POS_TEST_PRINTER` hardware test + human check | ❌ **not done — no thermal printer available** |
+
+### Known limitations
+- `sent` only means the spooler accepted the job. Most USB thermal drivers report "ready" even when
+  unplugged, out of paper or with the cover open; jobs then sit in the Windows queue.
+- The code page command (`ESC t 19`, CP858) and the cut command (`GS V 66 0`) are common ESC/POS but vary by
+  model; unsupported characters print as `?`.
+- Drivers that reject the `RAW` datatype (many v4/"class" drivers) fail with `NotSent`; ESC/POS printers need
+  the vendor driver or *Generic / Text Only*.
+- Avoid targeting *Microsoft Print to PDF* from the app: without an output file it opens a save dialog.
+- No print-job cleanup/retention, no status read-back (ASB), no cash drawer, no logo/QR, no LAN printers
+  without a Windows queue. No cloud sync, no LAN gateway (out of scope).
+
+### Hardware tests still to run
+1. Real 58 mm and 80 mm ESC/POS printers (USB and network-port queues): layout, accents (é è à ç €), cut.
+2. Printer off / unplugged / out of paper / cover open before sending: observe what the spooler and our state report.
+3. Unplug or power off **during** a job, and kill the app during a job: confirm `uncertain` handling and duplicate banners.
+4. Jobs stuck in the Windows queue while the printer is offline, then printed later (possible late duplicates after a reprint).
+5. Several stations on different printers at once; throughput during a rush.
+6. Driver variants: vendor driver vs. *Generic / Text Only*, v3 vs. v4.

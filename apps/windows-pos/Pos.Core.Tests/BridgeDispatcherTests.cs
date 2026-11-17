@@ -4,6 +4,7 @@ using Pos.Core.Bridge;
 using Pos.Core.Catalog;
 using Pos.Core.Data;
 using Pos.Core.Orders;
+using Pos.Core.Printing;
 
 namespace Pos.Core.Tests;
 
@@ -19,8 +20,14 @@ public sealed class BridgeDispatcherTests : IDisposable
 
     public void Dispose() => _test.Dispose();
 
-    private static BridgeDispatcher Create(PosDatabase db) =>
-        new(new ProductRepository(db), new DraftOrderRepository(db), NullLoggerFactory.Instance);
+    private static BridgeDispatcher Create(PosDatabase db)
+    {
+        var drafts = new DraftOrderRepository(db);
+        var settings = new PrintSettingsRepository(db);
+        var queue = new PrintQueue(db, NullLogger<PrintQueue>.Instance);
+        var printing = new PrintService(db, drafts, settings, queue, new FakePrinterGateway(), () => { });
+        return new(new ProductRepository(db), drafts, printing, NullLoggerFactory.Instance);
+    }
 
     private static string Request(string type, object payload, string id = "req-1") =>
         JsonSerializer.Serialize(new { v = 1, id, type, payload });
@@ -40,8 +47,55 @@ public sealed class BridgeDispatcherTests : IDisposable
     public void Allowlist_is_exactly_the_documented_commands()
     {
         Assert.Equal(
-            new[] { "draft.clear", "draft.load", "draft.save", "log.client", "products.list" },
+            new[]
+            {
+                "draft.clear", "draft.load", "draft.save", "log.client",
+                "print.destinations.list", "print.destinations.update", "print.jobs.list", "print.jobs.preview",
+                "print.jobs.reprint", "print.jobs.retry", "print.receipt", "print.tickets",
+                "printers.list", "products.list", "routing.update",
+            },
             _dispatcher.Commands.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void Print_receipt_enqueues_a_job_and_duplicates_need_confirmation()
+    {
+        var saved = Send(Request("draft.save", new { orderId = (string?)null, lines = new[] { new { productId = "p-pizza", quantity = 1 } } }));
+        var orderId = saved.GetProperty("result").GetProperty("id").GetString();
+
+        var first = Send(Request("print.receipt", new { orderId, confirmDuplicate = false }));
+        var job = first.GetProperty("result").GetProperty("jobs")[0];
+        Assert.Equal("queued", job.GetProperty("status").GetString());
+        Assert.Equal("receipt", job.GetProperty("destinationId").GetString());
+
+        Assert.Equal("duplicate_confirmation_required", ErrorCode(Send(Request("print.receipt", new { orderId, confirmDuplicate = false }))));
+        Assert.True(Send(Request("print.receipt", new { orderId, confirmDuplicate = true })).GetProperty("ok").GetBoolean());
+
+        var jobs = Send(Request("print.jobs.list", new { })).GetProperty("result");
+        Assert.Equal(2, jobs.GetArrayLength());
+    }
+
+    [Fact]
+    public void Print_settings_and_routing_round_trip()
+    {
+        var updated = Send(Request("print.destinations.update", new { id = "kitchen", printerName = "Thermal 80", paperWidthMm = 58 }));
+        Assert.Equal(58, updated.GetProperty("result").GetProperty("paperWidthMm").GetInt32());
+
+        Assert.True(Send(Request("routing.update", new { productId = "p-pizza", stationId = "bar" })).GetProperty("ok").GetBoolean());
+        var pizza = Send(Request("products.list", new { })).GetProperty("result").EnumerateArray().Single(p => p.GetProperty("id").GetString() == "p-pizza");
+        Assert.Equal("bar", pizza.GetProperty("stationId").GetString());
+
+        Assert.Equal("Thermal 80", Send(Request("printers.list", new { })).GetProperty("result")[0].GetProperty("name").GetString());
+    }
+
+    [Theory]
+    [InlineData("""{"v":1,"id":"r1","type":"print.receipt","payload":{"orderId":"x"}}""", "bad_request")]
+    [InlineData("""{"v":1,"id":"r1","type":"print.jobs.reprint","payload":{"jobId":"x","confirmDuplicate":"yes"}}""", "bad_request")]
+    [InlineData("""{"v":1,"id":"r1","type":"print.destinations.update","payload":{"id":"bar","printerName":"P","paperWidthMm":76}}""", "invalid_paper_width")]
+    [InlineData("""{"v":1,"id":"r1","type":"print.jobs.retry","payload":{"jobId":"nope"}}""", "job_not_found")]
+    public void Print_commands_validate_their_payloads(string json, string expectedCode)
+    {
+        Assert.Equal(expectedCode, ErrorCode(Send(json)));
     }
 
     [Fact]
@@ -131,6 +185,14 @@ public sealed class BridgeDispatcherTests : IDisposable
     }
 
     [Fact]
+    public void Error_messages_are_readable_french()
+    {
+        var response = Send("""{"v":1,"id":"r1","type":"fs.readFile","payload":{}}""");
+
+        Assert.Equal("Commande non autorisée.", response.GetProperty("error").GetProperty("message").GetString());
+    }
+
+    [Fact]
     public void Oversized_messages_are_rejected_before_parsing()
     {
         var json = Request("log.client", new { level = "info", message = new string('x', BridgeDispatcher.MaxMessageLength) });
@@ -161,7 +223,7 @@ public sealed class BridgeDispatcherTests : IDisposable
         var dir = Path.Combine(_test.Directory, "not-a-file.db");
         Directory.CreateDirectory(dir);
         var broken = new PosDatabase(dir, NullLogger<PosDatabase>.Instance);
-        var dispatcher = new BridgeDispatcher(new ProductRepository(broken), new DraftOrderRepository(broken), NullLoggerFactory.Instance);
+        var dispatcher = Create(broken);
 
         var response = Send(dispatcher, Request("products.list", new { }));
 

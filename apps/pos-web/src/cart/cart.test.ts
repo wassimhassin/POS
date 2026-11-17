@@ -9,6 +9,7 @@ const product = (id: string, priceMinor: number): Product => ({
   category: 'Test',
   priceMinor,
   currency: 'TND',
+  stationId: null,
 });
 
 const catalog = new Map([

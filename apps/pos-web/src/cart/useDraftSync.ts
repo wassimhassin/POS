@@ -16,6 +16,8 @@ export function useDraftSync(initialOrderId: string | null) {
   const lastFailed = useRef<Cart | null>(null);
   const [status, setStatus] = useState<SaveStatus>(initialOrderId ? 'saved' : 'idle');
   const [error, setError] = useState<string | null>(null);
+  // ID of the draft as committed on the host (null when no draft). Printing uses only this.
+  const [savedOrderId, setSavedOrderId] = useState<string | null>(initialOrderId);
 
   const persistOnce = useCallback(async (cart: Cart) => {
     if (cart.length === 0) {
@@ -53,6 +55,7 @@ export function useDraftSync(initialOrderId: string | null) {
       }
       lastFailed.current = null;
       setError(null);
+      setSavedOrderId(orderId.current);
       setStatus('saved');
     } catch (e) {
       lastFailed.current = queued.current ?? current;
@@ -78,5 +81,5 @@ export function useDraftSync(initialOrderId: string | null) {
     if (lastFailed.current) schedule(lastFailed.current);
   }, [schedule]);
 
-  return { status, error, schedule, retry };
+  return { status, error, savedOrderId, schedule, retry };
 }

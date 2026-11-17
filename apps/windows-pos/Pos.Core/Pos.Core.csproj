@@ -3,6 +3,8 @@
   <!-- UI-independent core: SQLite persistence, bridge dispatcher, structured logging. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- WritePrinter P/Invoke pins the job buffer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

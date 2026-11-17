@@ -10,14 +10,19 @@ using Pos.Core.Data;
 using Pos.Core.Hosting;
 using Pos.Core.Logging;
 using Pos.Core.Orders;
+using Pos.Core.Printing;
 
 namespace Pos.Desktop;
 
 /// <summary>Composition root: logging, database, bridge dispatcher, main window, global error handling.</summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1001", Justification = "Application lifetime: disposed in OnExit.")]
 public partial class App : Application
 {
+    private readonly CancellationTokenSource _shutdown = new();
     private ILoggerFactory? _loggerFactory;
     private ILogger _log = NullLogger.Instance;
+    private PrintWorker? _printWorker;
+    private Task? _printWorkerTask;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -41,9 +46,24 @@ public partial class App : Application
             var database = new PosDatabase(paths.DatabaseFile, _loggerFactory.CreateLogger<PosDatabase>());
             database.Initialize();
 
+            var drafts = new DraftOrderRepository(database);
+            var printSettings = new PrintSettingsRepository(database);
+            var printQueue = new PrintQueue(database, _loggerFactory.CreateLogger<PrintQueue>());
+            var recovered = printQueue.RecoverInterrupted();
+            if (recovered > 0)
+            {
+                _log.LogWarning("{JobCount} print jobs were interrupted by the previous shutdown and need operator review", recovered);
+            }
+
+            var printerGateway = new WindowsSpoolerPrinter();
+            _printWorker = new PrintWorker(printQueue, printSettings, printerGateway, _loggerFactory.CreateLogger<PrintWorker>());
+            var printing = new PrintService(database, drafts, printSettings, printQueue, printerGateway, _printWorker.Signal);
+            _printWorkerTask = Task.Run(() => _printWorker.RunAsync(_shutdown.Token));
+
             var dispatcher = new BridgeDispatcher(
                 new ProductRepository(database),
-                new DraftOrderRepository(database),
+                drafts,
+                printing,
                 _loggerFactory);
 
             var window = new MainWindow(paths, dispatcher, UiLocation.Resolve(e.Args), _loggerFactory.CreateLogger<MainWindow>());
@@ -67,6 +87,15 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _log.LogInformation("Application exiting {ExitCode}", e.ApplicationExitCode);
+        _shutdown.Cancel();
+        // Let an in-flight spooler call finish so its outcome is recorded (otherwise it becomes 'uncertain' on restart).
+        if (_printWorkerTask is not null && !_printWorkerTask.Wait(TimeSpan.FromSeconds(5)))
+        {
+            _log.LogWarning("Print worker did not stop within 5 s");
+        }
+
+        _printWorker?.Dispose();
+        _shutdown.Dispose();
         _loggerFactory?.Dispose();
         base.OnExit(e);
     }

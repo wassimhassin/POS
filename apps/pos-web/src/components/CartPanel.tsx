@@ -7,13 +7,21 @@ interface Props {
   onIncrement: (productId: string) => void;
   onDecrement: (productId: string) => void;
   onClear: () => void;
+  /** Printing is only possible once the draft is committed on the host. */
+  canPrint: boolean;
+  onPrintReceipt: () => void;
+  onPrintTickets: () => void;
 }
+
+const printButton =
+  'h-14 flex-1 rounded-xl bg-brand text-base font-semibold text-white active:bg-brand-strong disabled:opacity-40 ' +
+  'focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-brand';
 
 const stepButton =
   'grid h-12 w-12 place-items-center rounded-xl border border-line bg-surface text-2xl font-semibold ' +
   'active:bg-line focus-visible:outline-3 focus-visible:outline-brand';
 
-export function CartPanel({ view, currency, onIncrement, onDecrement, onClear }: Props) {
+export function CartPanel({ view, currency, onIncrement, onDecrement, onClear, canPrint, onPrintReceipt, onPrintTickets }: Props) {
   const empty = view.lines.length === 0;
   return (
     <aside className="flex h-full w-[400px] shrink-0 flex-col border-l border-line bg-panel" aria-label="Commande en cours">
@@ -65,12 +73,20 @@ export function CartPanel({ view, currency, onIncrement, onDecrement, onClear }:
             {formatMoney(view.totalMinor, currency)}
           </span>
         </div>
+        <div className="mt-4 flex gap-3">
+          <button type="button" onClick={onPrintTickets} disabled={!canPrint} className={printButton} data-testid="print-tickets">
+            Bons de préparation
+          </button>
+          <button type="button" onClick={onPrintReceipt} disabled={!canPrint} className={printButton} data-testid="print-receipt">
+            Ticket client
+          </button>
+        </div>
         <button
           type="button"
           onClick={onClear}
           disabled={empty}
           data-testid="clear-cart"
-          className="mt-4 h-14 w-full rounded-xl border border-danger/30 bg-danger-soft text-lg font-semibold text-danger active:bg-danger/15 disabled:opacity-40 focus-visible:outline-3 focus-visible:outline-danger"
+          className="mt-3 h-12 w-full rounded-xl border border-danger/30 bg-danger-soft text-lg font-semibold text-danger active:bg-danger/15 disabled:opacity-40 focus-visible:outline-3 focus-visible:outline-danger"
         >
           Vider la commande
         </button>
