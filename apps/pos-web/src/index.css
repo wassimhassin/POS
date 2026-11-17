@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+/* Semantic design tokens (single validated light theme for the prototype). */
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+
+  --color-surface: #f6f5f2;
+  --color-panel: #ffffff;
+  --color-ink: #1c1b19;
+  --color-ink-muted: #6b675f;
+  --color-line: #e4e1da;
+
+  --color-brand: #0f5c4d;
+  --color-brand-strong: #0a4237;
+  --color-brand-soft: #e3f0ec;
+
+  --color-success: #1d7a46;
+  --color-warning: #9a5b00;
+  --color-danger: #b42318;
+  --color-danger-soft: #fdecea;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-surface text-ink font-sans antialiased;
+  /* POS: avoid accidental text selection and the touch callout on long press. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+  }
+}

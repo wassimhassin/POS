@@ -1,0 +1,23 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Node / Vite
+node_modules/
+apps/pos-web/dist/
+*.tsbuildinfo
+
+# Local runtime data (if POS_DATA_DIR points inside the repo)
+*.db
+*.db-wal
+*.db-shm
+logs/
+
+# Editors
+.idea/
+.vscode/
+*.log
+

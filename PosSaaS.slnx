@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/apps/" />
+  <Folder Name="/apps/windows-pos/">
+    <Project Path="apps/windows-pos/Pos.Core.Tests/Pos.Core.Tests.csproj" />
+    <Project Path="apps/windows-pos/Pos.Core/Pos.Core.csproj" />
+    <Project Path="apps/windows-pos/Pos.Desktop/Pos.Desktop.csproj" />
+  </Folder>
+</Solution>
