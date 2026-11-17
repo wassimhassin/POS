@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Pos.Core.Bridge;
 using Pos.Core.Catalog;
 using Pos.Core.Data;
+using Pos.Core.Hosting;
 using Pos.Core.Logging;
 using Pos.Core.Orders;
 
@@ -21,6 +22,8 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        // Must run before anything can create a WebView2 environment.
+        var removedWebViewOverrides = HardenWebView2Environment();
         try
         {
             var paths = AppPaths.Resolve();
@@ -33,6 +36,7 @@ public partial class App : Application
 
             var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "?";
             _log.LogInformation("Application starting {AppVersion} {ProcessId} {DataDir}", version, Environment.ProcessId, paths.DataDir);
+            ReportWebView2Hardening(removedWebViewOverrides);
 
             var database = new PosDatabase(paths.DatabaseFile, _loggerFactory.CreateLogger<PosDatabase>());
             database.Initialize();
@@ -65,6 +69,41 @@ public partial class App : Application
         _log.LogInformation("Application exiting {ExitCode}", e.ApplicationExitCode);
         _loggerFactory?.Dispose();
         base.OnExit(e);
+    }
+
+    private static IReadOnlyList<string> HardenWebView2Environment()
+    {
+#if DEBUG
+        // Debug builds keep WEBVIEW2_* variables: the E2E tests use them to attach over CDP.
+        return [];
+#else
+        return WebView2EnvironmentGuard.RemoveProcessOverrides();
+#endif
+    }
+
+    private void ReportWebView2Hardening(IReadOnlyList<string> removed)
+    {
+#if DEBUG
+        var debugArgs = Environment.GetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
+        if (WebView2EnvironmentGuard.ContainsDebuggingSwitch(debugArgs))
+        {
+            _log.LogWarning("Debug build: WebView2 remote debugging enabled by environment {BrowserArguments}", debugArgs);
+        }
+#else
+        foreach (var name in removed)
+        {
+            _log.LogWarning("Removed WebView2 environment override {VariableName}", name);
+        }
+
+        var exeName = Path.GetFileName(Environment.ProcessPath) ?? "Pos.Desktop.exe";
+        if (WebView2Policy.ReadAdditionalBrowserArguments(exeName).Any(WebView2EnvironmentGuard.ContainsDebuggingSwitch))
+        {
+            throw new InvalidOperationException(
+                "Une stratégie Windows (WebView2 AdditionalBrowserArguments) active le débogage distant. " +
+                "Démarrage refusé pour des raisons de sécurité ; contactez l'administrateur du poste.");
+        }
+#endif
+        _ = removed;
     }
 
     private void RegisterGlobalErrorHandlers()

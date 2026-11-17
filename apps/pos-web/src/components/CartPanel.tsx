@@ -69,6 +69,7 @@ export function CartPanel({ view, currency, onIncrement, onDecrement, onClear }:
           type="button"
           onClick={onClear}
           disabled={empty}
+          data-testid="clear-cart"
           className="mt-4 h-14 w-full rounded-xl border border-danger/30 bg-danger-soft text-lg font-semibold text-danger active:bg-danger/15 disabled:opacity-40 focus-visible:outline-3 focus-visible:outline-danger"
         >
           Vider la commande
