@@ -53,6 +53,9 @@ public sealed partial class OrderService(GatewayStore store, PrintQueue printQue
     /// <summary>Called after a submission committed print jobs (wakes the print worker).</summary>
     public Action? PrintJobsCreated { get; set; }
 
+    /// <summary>Called after a commit appended a cloud outbox event (wakes the sync worker).</summary>
+    public Action? OutboxAppended { get; set; }
+
 #if DEBUG
     /// <summary>Test-only fault injection (Debug builds): kill the process right after a commit of this operation type.</summary>
     public string? CrashAfterCommitOf { get; set; }
@@ -340,9 +343,16 @@ public sealed partial class OrderService(GatewayStore store, PrintQueue printQue
                 update.ExecuteNonQuery();
             }
 
+            // Same transaction: the change and its cloud outbox event commit (or roll back) together.
+            var sequence = GatewayStore.AppendOutbox(connection, tx, operationId, type, position, session.TerminalId, GatewayStore.ToSyncOrder(order),
+                type == "submit" ? [.. applied.Intents.Select(i => i.StationId)] : null, null, now);
+
             tx.Commit();
             LogApplied(logger, type, operationId, session.TerminalId, order.Id, order.Version, position);
+            LogOutbox(logger, operationId, sequence);
         }
+
+        OutboxAppended?.Invoke();
 
 #if DEBUG
         if (CrashAfterCommitOf == type)
@@ -551,6 +561,9 @@ public sealed partial class OrderService(GatewayStore store, PrintQueue printQue
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Applied {OperationType} {OperationId} by {TerminalId} on order {OrderId} → version {OrderVersion} at position {LogPosition}")]
     private static partial void LogApplied(ILogger logger, string operationType, string operationId, string terminalId, string orderId, long orderVersion, long logPosition);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Operation {OperationId} queued for the cloud at outbox sequence {Sequence}")]
+    private static partial void LogOutbox(ILogger logger, string operationId, long sequence);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Replayed {OperationId} ({OperationType}) for {TerminalId}: original result returned, nothing re-applied")]
     private static partial void LogReplayed(ILogger logger, string operationId, string operationType, string terminalId);

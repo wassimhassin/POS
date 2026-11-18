@@ -4,6 +4,13 @@
     <Project Path="apps/branch-gateway/Pos.Gateway.Tests/Pos.Gateway.Tests.csproj" />
     <Project Path="apps/branch-gateway/Pos.Gateway/Pos.Gateway.csproj" />
   </Folder>
+  <Folder Name="/apps/cloud-api/">
+    <Project Path="apps/cloud-api/Pos.Cloud.Tests/Pos.Cloud.Tests.csproj" />
+    <Project Path="apps/cloud-api/Pos.Cloud/Pos.Cloud.csproj" />
+  </Folder>
+  <Folder Name="/apps/shared/">
+    <Project Path="apps/shared/Pos.Sync.Contracts/Pos.Sync.Contracts.csproj" />
+  </Folder>
   <Folder Name="/apps/windows-pos/">
     <Project Path="apps/windows-pos/Pos.Core.Tests/Pos.Core.Tests.csproj" />
     <Project Path="apps/windows-pos/Pos.Core/Pos.Core.csproj" />

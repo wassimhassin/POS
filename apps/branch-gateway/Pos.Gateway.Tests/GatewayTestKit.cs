@@ -38,15 +38,18 @@ public sealed partial class GatewayProcess : IAsyncDisposable
 
     public bool IsRunning => _process is { HasExited: false };
 
+    /// <summary>Extra arguments for « run » (e.g. sync tuning in cloud tests).</summary>
+    public List<string> RunArguments { get; } = [];
+
     public static string Executable
     {
         get
         {
-            // bin/<Configuration>/net10.0-windows of the test project → same configuration of the gateway.
+            // apps/<area>/<TestProject>/bin/<Configuration>/net10.0-windows → same configuration of the gateway.
             var testBin = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar));
             var configuration = testBin.Parent!.Name;
-            var root = testBin.Parent!.Parent!.Parent!.Parent!.FullName; // apps/branch-gateway
-            var exe = Path.Combine(root, "Pos.Gateway", "bin", configuration, "net10.0-windows", "Pos.Gateway.exe");
+            var apps = testBin.Parent!.Parent!.Parent!.Parent!.Parent!.FullName;
+            var exe = Path.Combine(apps, "branch-gateway", "Pos.Gateway", "bin", configuration, "net10.0-windows", "Pos.Gateway.exe");
             return File.Exists(exe) ? exe : throw new FileNotFoundException("Build Pos.Gateway first.", exe);
         }
     }
@@ -66,7 +69,7 @@ public sealed partial class GatewayProcess : IAsyncDisposable
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
-        foreach (var arg in new[] { "run", "--data-dir", DataDir, "--listen", $"https://127.0.0.1:{Port}" })
+        foreach (var arg in new[] { "run", "--data-dir", DataDir, "--listen", $"https://127.0.0.1:{Port}" }.Concat(RunArguments))
         {
             info.ArgumentList.Add(arg);
         }

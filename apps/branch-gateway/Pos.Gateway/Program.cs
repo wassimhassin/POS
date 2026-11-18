@@ -19,6 +19,9 @@ using Pos.Gateway;
 //   Pos.Gateway printer  --destination <kitchen|bar|counter|receipt> (--printer <name> | --none) [--width 58|80]
 //   Pos.Gateway backup   --out <file.db>
 //   Pos.Gateway status
+//   Pos.Gateway cloud-link --url https://<cloud> --code <one-time code> [--pin <cloud certificate SHA-256>]
+//
+//   run also accepts: --sync-batch <1..100> --sync-max-backoff <seconds> --sync-timeout <seconds>
 //
 // Every command accepts --data-dir <dir> (default: POS_GATEWAY_DATA_DIR, else %LOCALAPPDATA%\PosSaaS\Gateway).
 
@@ -86,6 +89,25 @@ try
             var id = store.GetIdentity();
             Console.WriteLine(id is null ? "Non initialisée." : $"Succursale {id.BranchName} ({id.BranchId}), schéma {GatewayStore.SchemaVersion}");
             Console.WriteLine($"Données : {dataDir}");
+            var link = store.GetCloudLink();
+            Console.WriteLine(link switch
+            {
+                null => "Cloud : non lié (les événements s'accumulent dans la file locale).",
+                { IsLinked: false } => $"Cloud : liaison en attente vers {link.CloudUrl} (code à usage unique fourni le {link.RequestedAt}).",
+                _ => $"Cloud : lié à {link.CloudUrl} — passerelle {link.GatewayId}, organisation {link.OrganizationName} ({link.OrganizationId}), entreprise {link.BusinessName} ({link.BusinessId})",
+            });
+            var sync = store.GetSyncStatus();
+            Console.WriteLine($"Synchronisation : {sync.AckedSequence}/{sync.LastSequence} acquittés, {sync.Pending} en attente, dernier succès {sync.LastSuccessAt ?? "-"}");
+            if (sync.LastError is not null)
+            {
+                Console.WriteLine($"Erreur ({sync.ConsecutiveFailures} échecs consécutifs{(sync.BlockedSequence is { } b ? $", bloquée à la séquence {b}" : "")}) : {sync.LastError}");
+            }
+
+            return 0;
+
+        case "cloud-link":
+            store.RequestCloudLink(options.Required("url"), options.Required("code"), options.One("pin"));
+            Console.WriteLine("Liaison enregistrée : la passerelle en cours d'exécution s'enregistre auprès du cloud (voir « status »).");
             return 0;
 
         case "run":
@@ -163,7 +185,21 @@ static async Task<int> RunAsync(GatewayStore store, Cli options, string dataDir,
     }
 
     var printWorker = new PrintWorker(printQueue, new PrintSettingsRepository(store.Database), new WindowsSpoolerPrinter(), loggerFactory.CreateLogger<PrintWorker>());
-    var orders = new OrderService(store, printQueue, loggerFactory.CreateLogger<OrderService>()) { PrintJobsCreated = printWorker.Signal };
+    // Phase 1.4: cloud synchronization from the durable outbox (outbound HTTPS only; no listener added).
+    var syncOptions = SyncOptions.Default with
+    {
+        BatchSize = Math.Clamp(int.Parse(options.One("sync-batch") ?? "100", CultureInfo.InvariantCulture), 1, Pos.Sync.SyncProtocol.MaxBatchEvents),
+        MaxBackoff = TimeSpan.FromSeconds(Math.Clamp(double.Parse(options.One("sync-max-backoff") ?? "60", CultureInfo.InvariantCulture), 1, 3600)),
+        RequestTimeout = TimeSpan.FromSeconds(Math.Clamp(double.Parse(options.One("sync-timeout") ?? "30", CultureInfo.InvariantCulture), 1, 300)),
+    };
+    var syncWorker = new CloudSyncWorker(store, syncOptions, loggerFactory.CreateLogger<CloudSyncWorker>());
+    builder.Services.AddHostedService(_ => syncWorker);
+
+    var orders = new OrderService(store, printQueue, loggerFactory.CreateLogger<OrderService>())
+    {
+        PrintJobsCreated = printWorker.Signal,
+        OutboxAppended = syncWorker.Signal,
+    };
 #if DEBUG
     orders.CrashAfterCommitOf = Environment.GetEnvironmentVariable("POS_GATEWAY_FAULT_CRASH_AFTER_COMMIT");
     if (orders.CrashAfterCommitOf is not null)

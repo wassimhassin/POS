@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\windows-pos\Pos.Core\Pos.Core.csproj" />
+    <ProjectReference Include="..\..\shared\Pos.Sync.Contracts\Pos.Sync.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

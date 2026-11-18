@@ -18,7 +18,7 @@ public sealed record TerminalRecord(string Id, string BranchId, string Name, byt
 /// the existing printing subsystem runs unchanged, and adds the gateway tables on top. Single writer:
 /// all shared-state mutations go through <see cref="OrderService"/> under one lock.
 /// </summary>
-public sealed class GatewayStore
+public sealed partial class GatewayStore
 {
     public const string DatabaseFileName = "gateway.db";
 
@@ -108,6 +108,55 @@ public sealed class GatewayStore
             PRIMARY KEY (order_id, station_id)
         );
         """,
+        // Phase 1.4: cloud synchronization. Existing identities (branch, terminals) are unchanged.
+        """
+        -- Durable outbox: one immutable event per committed change, written in the SAME transaction as the
+        -- change. sequence is contiguous (1, 2, 3…) and is the branch's position in the cloud event log.
+        -- Rows are never deleted: acknowledged ones keep acked_at (audit, resend after a cloud restore).
+        CREATE TABLE sync_outbox (
+            sequence           INTEGER NOT NULL PRIMARY KEY CHECK (sequence >= 1),
+            event_id           TEXT    NOT NULL UNIQUE,
+            type               TEXT    NOT NULL,
+            operation_position INTEGER NULL REFERENCES operations (position),
+            payload            TEXT    NOT NULL,
+            created_at         TEXT    NOT NULL,
+            attempts           INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at    TEXT    NULL,
+            acked_at           TEXT    NULL
+        );
+
+        -- Link to the cloud tenant hierarchy. The gateway's private key is DPAPI-protected (account running
+        -- the gateway); the cloud only knows the public key. pending_code is a one-time provisioning code,
+        -- consumed by the running gateway and then cleared.
+        CREATE TABLE cloud_link (
+            id                INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            cloud_url         TEXT    NOT NULL,
+            cloud_pin         TEXT    NULL,
+            pending_code      TEXT    NULL,
+            gateway_id        TEXT    NULL,
+            organization_id   TEXT    NULL,
+            organization_name TEXT    NULL,
+            business_id       TEXT    NULL,
+            business_name     TEXT    NULL,
+            private_key       BLOB    NULL,
+            requested_at      TEXT    NOT NULL,
+            linked_at         TEXT    NULL,
+            CHECK ((gateway_id IS NULL) = (private_key IS NULL))
+        );
+
+        CREATE TABLE sync_state (
+            id                   INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            acked_sequence       INTEGER NOT NULL DEFAULT 0,
+            catalog_hash         TEXT    NULL,
+            last_success_at      TEXT    NULL,
+            last_attempt_at      TEXT    NULL,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_error           TEXT    NULL,
+            blocked_sequence     INTEGER NULL
+        );
+
+        INSERT INTO sync_state (id) VALUES (1);
+        """,
     ];
 
     private const string CodeAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"; // no I/L/O/U/0/1 look-alikes
@@ -147,6 +196,11 @@ public sealed class GatewayStore
         {
             using var tx = connection.BeginTransaction();
             Execute(connection, tx, Migrations[next]);
+            if (next + 1 == 2)
+            {
+                BackfillOutbox(connection, tx);
+            }
+
             Execute(connection, tx, $"INSERT INTO gateway_schema (version) VALUES ({next + 1});");
             tx.Commit();
             _logger.LogInformation("Applied gateway migration {GatewaySchemaVersion}", next + 1);

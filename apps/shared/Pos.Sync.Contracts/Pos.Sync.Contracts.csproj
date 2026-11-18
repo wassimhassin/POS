@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Gateway ↔ cloud synchronization contract, shared by Pos.Gateway, Pos.Cloud and their tests.
+       Cross-platform: the cloud API is not tied to Windows. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>

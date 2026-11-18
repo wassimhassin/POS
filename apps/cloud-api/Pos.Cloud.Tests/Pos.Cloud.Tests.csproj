@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Integration tests: a REAL PostgreSQL server (throwaway cluster from the local PostgreSQL install),
+       a REAL Pos.Cloud process, REAL Pos.Gateway processes with their SQLite files, and simulated terminals
+       using the production terminal client. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1861;CA2234;CA1001;CA2100</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="Npgsql" Version="10.0.2" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The gateway test kit (real gateway process + simulated terminals) is shared, not copied. -->
+    <Compile Include="..\..\branch-gateway\Pos.Gateway.Tests\GatewayTestKit.cs" Link="GatewayTestKit.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\windows-pos\Pos.Core\Pos.Core.csproj" />
+    <ProjectReference Include="..\..\shared\Pos.Sync.Contracts\Pos.Sync.Contracts.csproj" />
+    <!-- Build order only: the tests launch these executables as separate processes. -->
+    <ProjectReference Include="..\Pos.Cloud\Pos.Cloud.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\branch-gateway\Pos.Gateway\Pos.Gateway.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

@@ -7,6 +7,9 @@
     restart-persistence / print-queue  Debug build (drives the UI over WebView2 remote debugging)
     release-no-remote-debugging         Release build (verifies remote debugging cannot be enabled)
     lan-gateway                         Debug build: two POS instances + a real gateway process
+    cloud-sync                          Debug build: POS + gateway + cloud API + throwaway PostgreSQL cluster
+                                        (offline orders, gateway crash, lost ack); needs PostgreSQL binaries
+  The cloud xUnit tests (Pos.Cloud.Tests) also start throwaway PostgreSQL clusters (POS_PG_BIN to override).
 .EXAMPLE
   .\scripts\test.ps1
   .\scripts\test.ps1 -SkipE2E

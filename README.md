@@ -1,13 +1,14 @@
-# SaaS POS — Phase 1 / 1.2 / 1.3 technical prototype
+# SaaS POS — Phase 1 / 1.2 / 1.3 / 1.4 technical prototype
 
 A minimal Windows proof of concept for the future multi-tenant café-restaurant POS. It shows that a
 **.NET 10 WPF + WebView2** shell can host a **React/TypeScript/Vite/Tailwind** touchscreen UI, talk to it
 through a narrow, validated bridge, and persist data in **SQLite** across restarts.
 
-> This is a feasibility spike, not the production POS. No cloud backend, authentication, tenants,
-> subscriptions, payments or cloud sync. Phase 1.2 adds a thermal-printing proof of concept (see
-> [Printing](#printing-phase-12)); Phase 1.3 adds a LAN branch gateway for shared orders between tills
-> (see [LAN gateway](#lan-gateway-phase-13)). See `docs/` for the full specifications.
+> This is a feasibility spike, not the production POS. No subscriptions, payments, dashboard or customer
+> QR. Phase 1.2 adds a thermal-printing proof of concept (see [Printing](#printing-phase-12)); Phase 1.3
+> adds a LAN branch gateway for shared orders between tills (see [LAN gateway](#lan-gateway-phase-13));
+> Phase 1.4 adds a multi-tenant cloud API with gateway → cloud order synchronization (see
+> [Cloud sync](#cloud-sync-phase-14)). See `docs/` for the full specifications.
 
 ## Layout
 
@@ -26,7 +27,12 @@ apps/
   branch-gateway/
     Pos.Gateway/             LAN gateway: ASP.NET Core minimal API + SignalR, SQLite, CLI / Windows Service
     Pos.Gateway.Tests/       integration tests: real gateway process + 2 simulated terminals
-tests/e2e/                   end-to-end tests driving the real app (restart, printing, release, lan-gateway)
+  cloud-api/
+    Pos.Cloud/               cloud API: ASP.NET Core + EF Core + PostgreSQL, admin CLI, migrations
+    Pos.Cloud.Tests/         integration tests: real PostgreSQL clusters, cloud and gateway processes
+  shared/
+    Pos.Sync.Contracts/      gateway ↔ cloud wire contract
+tests/e2e/                   end-to-end tests driving the real app (restart, printing, release, lan-gateway, cloud-sync)
 scripts/                     build, run, test, run-gateway, install-gateway-service
 docs/                        PRD, architecture, database, UI/UX, roadmap
 ```
@@ -37,6 +43,9 @@ docs/                        PRD, architecture, database, UI/UX, roadmap
 - .NET SDK 10 (`winget install Microsoft.DotNet.SDK.10`)
 - Node.js 22+ (tested with 24) and npm
 - Microsoft Edge WebView2 Runtime (preinstalled on Windows 11)
+- PostgreSQL binaries for the cloud tests (`initdb`, `pg_ctl`, `psql`; found under
+  `C:\Program Files\PostgreSQL\<n>\bin` or `POS_PG_BIN`; tested with 18). The tests start their own
+  throwaway clusters; an installed PostgreSQL service is neither used nor modified.
 
 ## Commands
 
@@ -220,3 +229,24 @@ Key properties: HTTPS only with certificate pinning, per-terminal key pairs (no 
 pairing codes, the gateway as the only SQLite writer, idempotent operations, optimistic versioning for
 overwrites, one durable print intent per station on submission, fail-closed while the gateway is down,
 and **no automatic failover** (the gateway is a documented single point of failure).
+
+## Cloud sync (Phase 1.4)
+
+Each branch gateway pushes its committed order operations to a multi-tenant cloud API (ASP.NET Core +
+PostgreSQL, Organization → Business → Branch). The gateway stays authoritative; the cloud keeps a
+synchronized copy for reporting. Design, protocol, failure handling, security and limitations:
+[docs/07-CLOUD-SYNC-PROTOTYPE.md](docs/07-CLOUD-SYNC-PROTOTYPE.md).
+
+- Every operation writes an outbox row in the same SQLite transaction; the gateway sends ordered, bounded
+  batches and retries with exponential backoff. Delivery is **at-least-once**; the cloud's per-branch
+  sequence checkpoint and unique event ids make replays harmless (exactly once at the record level, not
+  on the network).
+- Each gateway has its own key pair, registered once with a one-time code issued for its own branch;
+  every request is signed. Tenant and branch ids come from the credential, never from the request.
+- Rejected or conflicting events block sync at that point and are reported; they are never skipped or deleted.
+- Read-only reports per organization, business or branch with scoped keys (`Pos.Cloud report-key`).
+
+```powershell
+dotnet test apps/cloud-api/Pos.Cloud.Tests    # real PostgreSQL + cloud + gateway processes
+node tests/e2e/cloud-sync.mjs                 # POS app + gateway + cloud: offline orders, crash, lost ack
+```

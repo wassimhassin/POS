@@ -1,6 +1,8 @@
 // Shared helpers for the end-to-end tests (Windows only, Node >= 22 for global fetch/WebSocket).
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import https from 'node:https';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +30,77 @@ export function gatewayExe(configuration = 'Debug') {
 /** Runs a gateway CLI command (init, enroll, …) and returns its standard output. */
 export function gatewayCli(exe, dataDir, ...args) {
   return execFileSync(exe, [...args, '--data-dir', dataDir], { encoding: 'utf8' });
+}
+
+export function cloudExe(configuration = 'Debug') {
+  const exe = path.join(repoRoot, `apps/cloud-api/Pos.Cloud/bin/${configuration}/net10.0/Pos.Cloud.exe`);
+  if (!existsSync(exe)) throw new Error(`Cloud API not found: ${exe}. Build first (scripts/build.ps1).`);
+  return exe;
+}
+
+/** Locates the PostgreSQL binaries (POS_PG_BIN, else the newest C:\Program Files\PostgreSQL\<n>\bin). */
+export function postgresBin() {
+  if (process.env.POS_PG_BIN) return process.env.POS_PG_BIN;
+  const root = path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'PostgreSQL');
+  const versions = existsSync(root)
+    ? readdirSync(root).filter((v) => existsSync(path.join(root, v, 'bin', 'pg_ctl.exe'))).sort((a, b) => Number(b) - Number(a))
+    : [];
+  if (versions.length === 0) throw new Error('PostgreSQL not found: install it or set POS_PG_BIN.');
+  return path.join(root, versions[0], 'bin');
+}
+
+/**
+ * Throwaway PostgreSQL cluster in `dir` (initdb + pg_ctl, current user, 127.0.0.1, SCRAM passwords). The installed
+ * PostgreSQL service is not touched. Returns connection strings for the owner and for a data-only `pos_app` role.
+ */
+export async function startPostgres(dir) {
+  const bin = postgresBin();
+  const password = randomBytes(16).toString('hex');
+  const appPassword = randomBytes(16).toString('hex');
+  const pwFile = path.join(dir, 'pg-pw.txt');
+  writeFileSync(pwFile, password);
+  const data = path.join(dir, 'pgdata');
+  execFileSync(path.join(bin, 'initdb.exe'), ['-D', data, '-U', 'postgres', '-A', 'scram-sha-256', `--pwfile=${pwFile}`, '-E', 'UTF8', '--locale=C'], { stdio: 'ignore' });
+  rmSync(pwFile);
+  const port = randomPort() + 1000;
+  execFileSync(path.join(bin, 'pg_ctl.exe'), ['-D', data, '-o', `-p ${port} -c listen_addresses=127.0.0.1`, '-l', path.join(dir, 'postgres.log'), '-w', 'start'], { stdio: 'ignore' });
+  const psql = (db, sql) =>
+    execFileSync(path.join(bin, 'psql.exe'), ['-h', '127.0.0.1', '-p', String(port), '-U', 'postgres', '-d', db, '-v', 'ON_ERROR_STOP=1', '-tAc', sql], {
+      encoding: 'utf8',
+      env: { ...process.env, PGPASSWORD: password },
+    }).trim();
+  const db = 'pos_cloud';
+  const stop = () => execFileSync(path.join(bin, 'pg_ctl.exe'), ['-D', data, '-m', 'immediate', '-w', 'stop'], { stdio: 'ignore' });
+  try {
+    psql('postgres', `CREATE DATABASE ${db};`);
+    psql('postgres', `CREATE ROLE pos_app LOGIN PASSWORD '${appPassword}';`);
+  } catch (e) {
+    stop();
+    throw e;
+  }
+  log(`PostgreSQL started (port ${port})`);
+  return {
+    db,
+    owner: `Host=127.0.0.1;Port=${port};Username=postgres;Password=${password};Database=${db}`,
+    app: `Host=127.0.0.1;Port=${port};Username=pos_app;Password=${appPassword};Database=${db}`,
+    psql: (sql) => psql(db, sql),
+    grantApp: () =>
+      psql(db, `GRANT USAGE ON SCHEMA public TO pos_app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app;`),
+    stop,
+  };
+}
+
+/** GET over HTTPS trusting only the given PEM certificate (the cloud's development certificate). */
+export function httpsGetJson(url, ca, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { ca, headers }, (res) => {
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => resolve({ status: res.statusCode, body: body ? JSON.parse(body) : null }));
+    });
+    req.on('error', reject);
+    req.setTimeout(10_000, () => req.destroy(new Error('timeout')));
+  });
 }
 
 export async function waitForTcp(port, label, timeoutMs = 30_000) {
