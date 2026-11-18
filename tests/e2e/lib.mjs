@@ -19,6 +19,55 @@ export function desktopExe(configuration, override) {
   return exe;
 }
 
+export function gatewayExe(configuration = 'Debug') {
+  const exe = path.join(repoRoot, `apps/branch-gateway/Pos.Gateway/bin/${configuration}/net10.0-windows/Pos.Gateway.exe`);
+  if (!existsSync(exe)) throw new Error(`Gateway not found: ${exe}. Build first (scripts/build.ps1).`);
+  return exe;
+}
+
+/** Runs a gateway CLI command (init, enroll, …) and returns its standard output. */
+export function gatewayCli(exe, dataDir, ...args) {
+  return execFileSync(exe, [...args, '--data-dir', dataDir], { encoding: 'utf8' });
+}
+
+export async function waitForTcp(port, label, timeoutMs = 30_000) {
+  const { connect } = await import('node:net');
+  return waitUntil(
+    () =>
+      new Promise((resolve) => {
+        const socket = connect(port, '127.0.0.1');
+        socket.once('connect', () => {
+          socket.destroy();
+          resolve(true);
+        });
+        socket.once('error', () => resolve(false));
+      }),
+    label,
+    timeoutMs,
+  );
+}
+
+/** Sets a React-controlled input's value the way a user typing would. */
+export function fill(cdp, testId, value) {
+  return cdp.evaluate(`(() => {
+    const el = document.querySelector('[data-testid="${testId}"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, ${JSON.stringify(value)});
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+}
+
+/** Calls the host bridge from the page with a private listener (same allowlisted protocol as the UI). */
+export function bridge(cdp, type, payload) {
+  return cdp.evaluate(`new Promise((resolve) => {
+    const id = crypto.randomUUID();
+    const handler = (e) => {
+      if (e.data && e.data.id === id) { window.chrome.webview.removeEventListener('message', handler); resolve(e.data); }
+    };
+    window.chrome.webview.addEventListener('message', handler);
+    window.chrome.webview.postMessage({ v: 1, id, type: ${JSON.stringify(type)}, payload: ${JSON.stringify(payload)} });
+  })`);
+}
+
 export function randomPort() {
   return 9300 + Math.floor(Math.random() * 500);
 }

@@ -1,12 +1,13 @@
-# SaaS POS — Phase 1 / 1.2 technical prototype
+# SaaS POS — Phase 1 / 1.2 / 1.3 technical prototype
 
 A minimal Windows proof of concept for the future multi-tenant café-restaurant POS. It shows that a
 **.NET 10 WPF + WebView2** shell can host a **React/TypeScript/Vite/Tailwind** touchscreen UI, talk to it
 through a narrow, validated bridge, and persist data in **SQLite** across restarts.
 
 > This is a feasibility spike, not the production POS. No cloud backend, authentication, tenants,
-> subscriptions, payments, cloud sync or LAN gateway. Phase 1.2 adds a thermal-printing proof of
-> concept (see [Printing](#printing-phase-12)). See `docs/` for the full specifications.
+> subscriptions, payments or cloud sync. Phase 1.2 adds a thermal-printing proof of concept (see
+> [Printing](#printing-phase-12)); Phase 1.3 adds a LAN branch gateway for shared orders between tills
+> (see [LAN gateway](#lan-gateway-phase-13)). See `docs/` for the full specifications.
 
 ## Layout
 
@@ -22,8 +23,11 @@ apps/
     Pos.Desktop/             thin WPF host: window, WebView2, bridge transport, composition root
     Pos.Core/                UI-independent core: SQLite, repositories, bridge dispatcher, JSON logger
     Pos.Core.Tests/          xUnit tests (database, persistence across restart, bridge security)
-tests/e2e/                   end-to-end restart test driving the real app
-scripts/                     build.ps1, run.ps1, test.ps1
+  branch-gateway/
+    Pos.Gateway/             LAN gateway: ASP.NET Core minimal API + SignalR, SQLite, CLI / Windows Service
+    Pos.Gateway.Tests/       integration tests: real gateway process + 2 simulated terminals
+tests/e2e/                   end-to-end tests driving the real app (restart, printing, release, lan-gateway)
+scripts/                     build, run, test, run-gateway, install-gateway-service
 docs/                        PRD, architecture, database, UI/UX, roadmap
 ```
 
@@ -190,3 +194,29 @@ Rules:
 4. Jobs stuck in the Windows queue while the printer is offline, then printed later (possible late duplicates after a reprint).
 5. Several stations on different printers at once; throughput during a rush.
 6. Driver variants: vendor driver vs. *Generic / Text Only*, v3 vs. v4.
+
+## LAN gateway (Phase 1.3)
+
+Two or more tills share restaurant orders through one **branch gateway** on the LAN, with no internet.
+The full design, security model, failure handling, single-point-of-failure recovery procedure, remaining
+risks and multi-machine tests to run are in [docs/06-LAN-GATEWAY-PROTOTYPE.md](docs/06-LAN-GATEWAY-PROTOTYPE.md).
+
+Try it on one PC:
+
+```powershell
+.\scripts\build.ps1
+.\scripts\run-gateway.ps1          # console gateway on https://0.0.0.0:7443 (initializes a dev branch)
+# In a second terminal: one pairing code per till (prints the code + certificate fingerprint)
+apps\branch-gateway\Pos.Gateway\bin\Debug\net10.0-windows\Pos.Gateway.exe enroll --name "Caisse A"
+$env:POS_DATA_DIR = "$env:TEMP\pos-a"; .\scripts\run.ps1 -NoBuild   # repeat with pos-b for a second till
+```
+
+In the POS, click the gateway badge (top right) and enter `https://127.0.0.1:7443`, the fingerprint and
+the code, then use **Commandes partagées**. Gateway CLI: `init`, `run`, `enroll`, `terminals`, `revoke`,
+`printer`, `backup`, `status` (all take `--data-dir`). Deployment as a Windows Service:
+`scripts/install-gateway-service.ps1` (elevated; not executed during this validation).
+
+Key properties: HTTPS only with certificate pinning, per-terminal key pairs (no shared secret), one-time
+pairing codes, the gateway as the only SQLite writer, idempotent operations, optimistic versioning for
+overwrites, one durable print intent per station on submission, fail-closed while the gateway is down,
+and **no automatic failover** (the gateway is a documented single point of failure).

@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Pos.Core.Catalog;
+using Pos.Core.Gateway;
 using Pos.Core.Orders;
 using Pos.Core.Printing;
 
@@ -33,10 +34,12 @@ public sealed partial class BridgeDispatcher
     };
 
     private readonly Dictionary<string, Func<JsonElement, object?>> _handlers;
+    private readonly Dictionary<string, Func<JsonElement, Task<object?>>> _asyncHandlers;
     private readonly ILogger _logger;
     private readonly ILogger _uiLogger;
 
-    public BridgeDispatcher(ProductRepository products, DraftOrderRepository drafts, PrintService printing, ILoggerFactory loggerFactory)
+    /// <param name="gateway">Phase 1.3 LAN gateway client; null when the shared-order feature is not wired (unit tests).</param>
+    public BridgeDispatcher(ProductRepository products, DraftOrderRepository drafts, PrintService printing, ILoggerFactory loggerFactory, GatewayClient? gateway = null)
     {
         ArgumentNullException.ThrowIfNull(products);
         ArgumentNullException.ThrowIfNull(drafts);
@@ -117,13 +120,61 @@ public sealed partial class BridgeDispatcher
                 var req = Read<ReprintPayload>(p);
                 return printing.Reprint(req.JobId, req.ConfirmDuplicate);
             },
+
+            // --- Phase 1.3 shared orders through the branch gateway ---
+            ["gateway.state"] = p =>
+            {
+                Read<EmptyPayload>(p);
+                return gateway?.Snapshot();
+            },
         };
+
+        // Network-bound commands. Operation IDs come from the UI (one per operator action), so a retried
+        // action keeps its idempotency key.
+        _asyncHandlers = new(StringComparer.Ordinal)
+        {
+            ["gateway.enroll"] = async p =>
+            {
+                var req = Read<GatewayEnrollPayload>(p);
+                return await Gateway().EnrollAsync(req.Url, req.Fingerprint, req.Code).ConfigureAwait(false);
+            },
+            ["shared.create"] = async p =>
+            {
+                var req = Read<SharedCreatePayload>(p);
+                return await Gateway().CreateOrderAsync(req.OperationId, req.Label).ConfigureAwait(false);
+            },
+            ["shared.addItem"] = async p =>
+            {
+                var req = Read<SharedAddItemPayload>(p);
+                return await Gateway().AddItemAsync(req.OperationId, req.OrderId, req.ProductId, req.Quantity).ConfigureAwait(false);
+            },
+            ["shared.setQuantity"] = async p =>
+            {
+                var req = Read<SharedSetQuantityPayload>(p);
+                return await Gateway().SetQuantityAsync(req.OperationId, req.OrderId, req.ProductId, req.Quantity, req.ExpectedVersion).ConfigureAwait(false);
+            },
+            ["shared.submit"] = async p =>
+            {
+                var req = Read<SharedSubmitPayload>(p);
+                return await Gateway().SubmitAsync(req.OperationId, req.OrderId, req.ExpectedVersion).ConfigureAwait(false);
+            },
+        };
+
+        GatewayClient Gateway() =>
+            gateway ?? throw new BridgeException("gateway_not_configured", "Les commandes partagées ne sont pas disponibles sur ce poste.");
     }
 
-    public IReadOnlyCollection<string> Commands => _handlers.Keys;
+    public IReadOnlyCollection<string> Commands => [.. _handlers.Keys, .. _asyncHandlers.Keys];
+
+    /// <summary>Host → UI notification (no request id, so it can never be mistaken for a response).</summary>
+    public static string SerializeEvent(string eventName, object? payload) =>
+        JsonSerializer.Serialize(new HostEvent(ProtocolVersion, eventName, payload), JsonOptions);
+
+    /// <summary>Synchronous convenience for callers without async context (tests).</summary>
+    public string Handle(string requestJson) => HandleAsync(requestJson).GetAwaiter().GetResult();
 
     /// <summary>Processes one request message and always returns a response message (never throws).</summary>
-    public string Handle(string requestJson)
+    public async Task<string> HandleAsync(string requestJson)
     {
         var started = Stopwatch.GetTimestamp();
         string? id = null;
@@ -163,7 +214,9 @@ public sealed partial class BridgeDispatcher
             }
 
             var requestedType = typeElement.GetString()!;
-            if (!_handlers.TryGetValue(requestedType, out var handler))
+            _handlers.TryGetValue(requestedType, out var handler);
+            _asyncHandlers.TryGetValue(requestedType, out var asyncHandler);
+            if (handler is null && asyncHandler is null)
             {
                 throw new BridgeException("unknown_command", "Commande non autorisée.");
             }
@@ -174,7 +227,7 @@ public sealed partial class BridgeDispatcher
                 throw new BridgeException("bad_request", "Message invalide.");
             }
 
-            var result = handler(payload);
+            var result = handler is not null ? handler(payload) : await asyncHandler!(payload).ConfigureAwait(false);
             var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             LogRequestCompleted(_logger, type, id, elapsedMs);
             return JsonSerializer.Serialize(new SuccessResponse(id, true, result), JsonOptions);
@@ -279,6 +332,18 @@ public sealed partial class BridgeDispatcher
     private sealed record JobPayload(string JobId);
 
     private sealed record ReprintPayload(string JobId, bool ConfirmDuplicate);
+
+    private sealed record HostEvent(int V, string Event, object? Payload);
+
+    private sealed record GatewayEnrollPayload(string Url, string Fingerprint, string Code);
+
+    private sealed record SharedCreatePayload(string OperationId, string? Label);
+
+    private sealed record SharedAddItemPayload(string OperationId, string OrderId, string ProductId, int Quantity);
+
+    private sealed record SharedSetQuantityPayload(string OperationId, string OrderId, string ProductId, int Quantity, long ExpectedVersion);
+
+    private sealed record SharedSubmitPayload(string OperationId, string OrderId, long ExpectedVersion);
 }
 
 public sealed class BridgeException : Exception

@@ -106,6 +106,35 @@ public sealed class PosDatabase
 
         CREATE INDEX ix_print_job_events_job ON print_job_events (job_id, id);
         """,
+
+        // v3 — Phase 1.3 LAN gateway: stable terminal identity (private key DPAPI-protected), the
+        // gateway this terminal is paired with, and mutations whose outcome is not yet known.
+        """
+        CREATE TABLE terminal_identity (
+            id          INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            terminal_id TEXT    NOT NULL,
+            private_key BLOB    NOT NULL,
+            public_key  BLOB    NOT NULL,
+            created_at  TEXT    NOT NULL
+        );
+
+        CREATE TABLE gateway_link (
+            id            INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            gateway_url   TEXT    NOT NULL,
+            cert_sha256   TEXT    NOT NULL,
+            branch_id     TEXT    NOT NULL,
+            branch_name   TEXT    NOT NULL,
+            terminal_name TEXT    NOT NULL,
+            enrolled_at   TEXT    NOT NULL
+        );
+
+        CREATE TABLE gateway_pending_operations (
+            operation_id TEXT NOT NULL PRIMARY KEY,
+            type         TEXT NOT NULL,
+            description  TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        """,
     ];
 
     /// <summary>For migration tests: the SQL of each schema version.</summary>

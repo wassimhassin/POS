@@ -1,19 +1,23 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- UI-independent core: SQLite persistence, bridge dispatcher, structured logging. -->
+  <!-- UI-independent core: SQLite persistence, bridge dispatcher, printing, gateway client, structured logging. -->
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <!-- WritePrinter P/Invoke pins the job buffer. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.15" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.15" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.15" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.15" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Pos.Core.Tests" />
+    <InternalsVisibleTo Include="Pos.Gateway" />
+    <InternalsVisibleTo Include="Pos.Gateway.Tests" />
   </ItemGroup>
 
 </Project>

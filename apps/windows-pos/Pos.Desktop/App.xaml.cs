@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Pos.Core.Bridge;
 using Pos.Core.Catalog;
 using Pos.Core.Data;
+using Pos.Core.Gateway;
 using Pos.Core.Hosting;
 using Pos.Core.Logging;
 using Pos.Core.Orders;
@@ -23,6 +24,8 @@ public partial class App : Application
     private ILogger _log = NullLogger.Instance;
     private PrintWorker? _printWorker;
     private Task? _printWorkerTask;
+    private GatewayClient? _gateway;
+    private Task? _gatewayTask;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -60,13 +63,22 @@ public partial class App : Application
             var printing = new PrintService(database, drafts, printSettings, printQueue, printerGateway, _printWorker.Signal);
             _printWorkerTask = Task.Run(() => _printWorker.RunAsync(_shutdown.Token));
 
+            // Phase 1.3: stable terminal identity + connection to the branch gateway (if paired).
+            var terminal = new TerminalStore(database);
+            _gateway = new GatewayClient(terminal, _loggerFactory.CreateLogger<GatewayClient>());
+            _log.LogInformation("Terminal identity {TerminalId}", terminal.TerminalId);
+            _gatewayTask = Task.Run(() => _gateway.RunAsync(_shutdown.Token));
+
             var dispatcher = new BridgeDispatcher(
                 new ProductRepository(database),
                 drafts,
                 printing,
-                _loggerFactory);
+                _loggerFactory,
+                _gateway);
 
             var window = new MainWindow(paths, dispatcher, UiLocation.Resolve(e.Args), _loggerFactory.CreateLogger<MainWindow>());
+            var gateway = _gateway;
+            gateway.Changed += () => window.PushEvent("gateway.changed", gateway.Snapshot);
             MainWindow = window;
             window.Show();
         }
@@ -95,6 +107,16 @@ public partial class App : Application
         }
 
         _printWorker?.Dispose();
+        try
+        {
+            _gatewayTask?.Wait(TimeSpan.FromSeconds(3));
+        }
+        catch (AggregateException)
+        {
+            // cancelled on shutdown
+        }
+
+        _gateway?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2));
         _shutdown.Dispose();
         _loggerFactory?.Dispose();
         base.OnExit(e);

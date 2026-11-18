@@ -63,6 +63,82 @@ export interface EnqueueResult {
   unroutedItems: string[];
 }
 
+// --- Shared orders through the branch LAN gateway (Phase 1.3) ---
+
+export type GatewayConnectionState = 'not_configured' | 'connecting' | 'connected' | 'offline';
+
+export interface GatewayStatus {
+  state: GatewayConnectionState;
+  terminalId: string;
+  terminalName: string | null;
+  branchName: string | null;
+  gatewayUrl: string | null;
+  lastError: string | null;
+  since: string;
+  pendingOperations: number;
+}
+
+export interface SharedOrderLine {
+  productId: string;
+  name: string;
+  unitPriceMinor: number;
+  quantity: number;
+  lineTotalMinor: number;
+  stationId: string | null;
+}
+
+export interface SharedOrder {
+  id: string;
+  number: number;
+  label: string | null;
+  status: 'open' | 'submitted';
+  version: number;
+  lines: SharedOrderLine[];
+  itemCount: number;
+  totalMinor: number;
+  currency: string;
+  createdByName: string;
+  updatedByName: string;
+  createdAt: string;
+  updatedAt: string;
+  submittedAt: string | null;
+  submittedByName: string | null;
+}
+
+export interface GatewayNotice {
+  id: number;
+  tone: 'ok' | 'warning';
+  message: string;
+  at: string;
+}
+
+export interface GatewaySnapshot {
+  status: GatewayStatus;
+  orders: SharedOrder[];
+  notices: GatewayNotice[];
+}
+
+export interface OperationResult {
+  operationId: string;
+  position: number;
+  replayed: boolean;
+  order: SharedOrder;
+  printIntents: { stationId: string; printJobId: string }[];
+  unroutedItems: string[];
+}
+
+export interface EnrollResult {
+  branchId: string;
+  branchName: string;
+  terminalId: string;
+  terminalName: string;
+}
+
+/** Host → UI push messages (no request id). */
+export interface HostEvents {
+  'gateway.changed': GatewaySnapshot;
+}
+
 export interface PrintPreview {
   jobId: string;
   paperWidthMm: PaperWidthMm;
@@ -113,6 +189,18 @@ export interface BridgeCommands {
   'print.jobs.preview': { request: { jobId: string }; response: PrintPreview };
   'print.jobs.retry': { request: { jobId: string }; response: PrintJob };
   'print.jobs.reprint': { request: { jobId: string; confirmDuplicate: boolean }; response: EnqueueResult };
+  'gateway.state': { request: Record<string, never>; response: GatewaySnapshot | null };
+  'gateway.enroll': { request: { url: string; fingerprint: string; code: string }; response: EnrollResult };
+  'shared.create': { request: { operationId: string; label: string | null }; response: OperationResult };
+  'shared.addItem': {
+    request: { operationId: string; orderId: string; productId: string; quantity: number };
+    response: OperationResult;
+  };
+  'shared.setQuantity': {
+    request: { operationId: string; orderId: string; productId: string; quantity: number; expectedVersion: number };
+    response: OperationResult;
+  };
+  'shared.submit': { request: { operationId: string; orderId: string; expectedVersion: number }; response: OperationResult };
 }
 
 export type BridgeCommand = keyof BridgeCommands;

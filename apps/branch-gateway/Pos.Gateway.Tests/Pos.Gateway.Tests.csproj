@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Integration tests: a REAL gateway process (Pos.Gateway.exe) + simulated terminals using the real
+       terminal client from Pos.Core. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <!-- CA1001: fixtures are disposed by xUnit through IAsyncLifetime. -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1861;CA2234;CA1001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\windows-pos\Pos.Core\Pos.Core.csproj" />
+    <!-- Build order only: the tests launch the gateway executable as a separate process. -->
+    <ProjectReference Include="..\Pos.Gateway\Pos.Gateway.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

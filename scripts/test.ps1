@@ -6,6 +6,7 @@
   E2E tests:
     restart-persistence / print-queue  Debug build (drives the UI over WebView2 remote debugging)
     release-no-remote-debugging         Release build (verifies remote debugging cannot be enabled)
+    lan-gateway                         Debug build: two POS instances + a real gateway process
 .EXAMPLE
   .\scripts\test.ps1
   .\scripts\test.ps1 -SkipE2E

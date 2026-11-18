@@ -4,6 +4,7 @@ import {
   type BridgeCommands,
   type BridgeResponse,
   type ClientLogLevel,
+  type HostEvents,
 } from './contracts';
 
 interface WebViewMessaging {
@@ -55,10 +56,33 @@ export function isBridgeResponse(value: unknown): value is BridgeResponse {
   return typeof err === 'object' && err !== null && typeof err.code === 'string' && typeof err.message === 'string';
 }
 
+type HostEventHandler = (payload: unknown) => void;
+const hostEventHandlers = new Map<string, Set<HostEventHandler>>();
+
+export function isHostEvent(value: unknown): value is { v: number; event: string; payload: unknown } {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return v.v === BRIDGE_PROTOCOL_VERSION && typeof v.event === 'string' && !('id' in v) && 'payload' in v;
+}
+
+/** Subscribes to host → UI push messages. Returns an unsubscribe function. */
+export function onHostEvent<K extends keyof HostEvents>(name: K, handler: (payload: HostEvents[K]) => void): () => void {
+  const wv = webview();
+  if (wv) ensureListener(wv);
+  const set = hostEventHandlers.get(name) ?? new Set<HostEventHandler>();
+  set.add(handler as HostEventHandler);
+  hostEventHandlers.set(name, set);
+  return () => set.delete(handler as HostEventHandler);
+}
+
 function ensureListener(wv: WebViewMessaging): void {
   if (listening) return;
   wv.addEventListener('message', (event) => {
     const msg = event.data;
+    if (isHostEvent(msg)) {
+      hostEventHandlers.get(msg.event)?.forEach((h) => h(msg.payload));
+      return;
+    }
     if (!isBridgeResponse(msg)) return; // ignore anything that is not a correlated response
     const entry = pending.get(msg.id);
     if (!entry) return;

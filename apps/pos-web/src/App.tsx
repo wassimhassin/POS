@@ -11,6 +11,11 @@ import { ConfirmDialog, type ConfirmRequest } from './components/ConfirmDialog';
 import { attentionCount, isDuplicateConfirmationRequired } from './printing/jobs';
 import { PrintPanel } from './printing/PrintPanel';
 import { usePrintJobs } from './printing/usePrintJobs';
+import { GatewayBadge } from './gateway/GatewayBadge';
+import { GatewaySetupDialog } from './gateway/GatewaySetupDialog';
+import { reportError, SharedOrdersPanel } from './gateway/SharedOrdersPanel';
+import { canMutate, newOperationId } from './gateway/shared';
+import { useGateway } from './gateway/useGateway';
 
 type LoadState =
   | { kind: 'loading' }
@@ -88,6 +93,45 @@ function PosScreen({ products: initialProducts, initialDraft }: { products: Prod
     return () => clearTimeout(timer);
   }, [notice]);
 
+  // --- Shared orders through the branch gateway (Phase 1.3) ---
+  const { snapshot: gateway } = useGateway();
+  const [mode, setMode] = useState<'local' | 'shared'>('local');
+  const [sharedId, setSharedId] = useState<string | null>(null);
+  const [gatewayDialog, setGatewayDialog] = useState(false);
+  const sharedOrder = gateway?.orders.find((o) => o.id === sharedId) ?? null;
+
+  // Outcomes of operations interrupted by a disconnection, reported once.
+  const lastNotice = useRef(0);
+  useEffect(() => {
+    const fresh = gateway?.notices.filter((n) => n.id > lastNotice.current) ?? [];
+    if (fresh.length === 0) return;
+    lastNotice.current = Math.max(...fresh.map((n) => n.id));
+    const latest = fresh[fresh.length - 1]!;
+    notify(latest.tone, latest.message);
+  }, [gateway?.notices, notify]);
+
+  const addShared = useCallback(
+    (productId: string) => {
+      if (!canMutate(gateway?.status ?? null)) {
+        notify('danger', 'Passerelle indisponible : les commandes partagées sont bloquées.');
+        return;
+      }
+      if (!sharedOrder || sharedOrder.status !== 'open') {
+        notify('warning', 'Sélectionnez ou créez une commande partagée ouverte.');
+        return;
+      }
+      call('shared.addItem', { operationId: newOperationId(), orderId: sharedOrder.id, productId, quantity: 1 }).catch((e: unknown) =>
+        reportError(e, notify),
+      );
+    },
+    [gateway?.status, sharedOrder, notify],
+  );
+
+  const displayedQuantities = useMemo(
+    () => (mode === 'shared' ? new Map(sharedOrder?.lines.map((l) => [l.productId, l.quantity]) ?? []) : quantities),
+    [mode, sharedOrder, quantities],
+  );
+
   const canPrint = sync.status === 'saved' && sync.savedOrderId !== null && cart.length > 0;
 
   const print = useCallback(
@@ -142,12 +186,31 @@ function PosScreen({ products: initialProducts, initialDraft }: { products: Prod
   return (
     <div className="flex h-full flex-col" data-save-status={sync.status}>
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-line bg-panel px-6">
-        <div className="flex items-baseline gap-3">
+        <div className="flex items-center gap-4">
           <span className="text-xl font-bold text-brand">POS</span>
-          <span className="text-sm text-ink-muted">Prototype technique · Phase 1.2</span>
+          <div className="flex gap-1 rounded-xl bg-surface p-1" role="group" aria-label="Mode de vente">
+            {(
+              [
+                ['local', 'Vente directe'],
+                ['shared', 'Commandes partagées'],
+              ] as const
+            ).map(([m, label]) => (
+              <button
+                key={m}
+                type="button"
+                aria-pressed={mode === m}
+                onClick={() => setMode(m)}
+                data-testid={`mode-${m}`}
+                className={`h-10 rounded-lg px-4 text-sm font-semibold ${mode === m ? 'bg-brand text-white' : 'text-ink'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex items-center gap-4">
-          <SaveStatusBadge status={sync.status} onRetry={sync.retry} />
+          <GatewayBadge status={gateway?.status ?? null} onClick={() => setGatewayDialog(true)} />
+          {mode === 'local' && <SaveStatusBadge status={sync.status} onRetry={sync.retry} />}
           <button
             type="button"
             onClick={() => setPanelOpen(true)}
@@ -169,21 +232,40 @@ function PosScreen({ products: initialProducts, initialDraft }: { products: Prod
         <main className="min-w-0 flex-1 overflow-y-auto p-6" aria-label="Produits">
           <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-4" data-testid="product-grid">
             {products.map((p) => (
-              <ProductCard key={p.id} product={p} quantityInCart={quantities.get(p.id) ?? 0} onAdd={onAdd} />
+              <ProductCard
+                key={p.id}
+                product={p}
+                quantityInCart={displayedQuantities.get(p.id) ?? 0}
+                onAdd={mode === 'shared' ? addShared : onAdd}
+              />
             ))}
           </div>
         </main>
-        <CartPanel
-          view={view}
-          currency={currency}
-          onIncrement={onAdd}
-          onDecrement={onDecrement}
-          onClear={onClear}
-          canPrint={canPrint}
-          onPrintReceipt={() => void print('print.receipt', false)}
-          onPrintTickets={() => void print('print.tickets', false)}
-        />
+        {mode === 'shared' ? (
+          <SharedOrdersPanel snapshot={gateway} selectedId={sharedId} onSelect={setSharedId} notify={notify} />
+        ) : (
+          <CartPanel
+            view={view}
+            currency={currency}
+            onIncrement={onAdd}
+            onDecrement={onDecrement}
+            onClear={onClear}
+            canPrint={canPrint}
+            onPrintReceipt={() => void print('print.receipt', false)}
+            onPrintTickets={() => void print('print.tickets', false)}
+          />
+        )}
       </div>
+      {gatewayDialog && (
+        <GatewaySetupDialog
+          status={gateway?.status ?? null}
+          onClose={() => setGatewayDialog(false)}
+          onEnrolled={(message) => {
+            setGatewayDialog(false);
+            notify('ok', message);
+          }}
+        />
+      )}
 
       {notice && (
         <div

@@ -142,7 +142,7 @@ public partial class MainWindow : Window
             }
 
             var request = e.WebMessageAsJson;
-            var response = await Task.Run(() => _dispatcher.Handle(request));
+            var response = await Task.Run(() => _dispatcher.HandleAsync(request));
             WebView.CoreWebView2?.PostWebMessageAsJson(response);
         }
 #pragma warning disable CA1031 // async void event handler: log transport failures instead of crashing.
@@ -152,6 +152,36 @@ public partial class MainWindow : Window
             _log.LogError(ex, "Bridge transport failure");
         }
     }
+
+    /// <summary>
+    /// Host → UI push (no request id): <c>{ v: 1, event, payload }</c>. Coalesced: bursts of changes
+    /// produce one message carrying the latest state.
+    /// </summary>
+    internal void PushEvent(string eventName, Func<object?> payload)
+    {
+        if (Interlocked.Exchange(ref _pushPending, 1) == 1)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            Interlocked.Exchange(ref _pushPending, 0);
+            try
+            {
+                var json = BridgeDispatcher.SerializeEvent(eventName, payload());
+                WebView.CoreWebView2?.PostWebMessageAsJson(json);
+            }
+#pragma warning disable CA1031 // A failed notification must not crash the POS; the UI also polls.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                _log.LogWarning(ex, "Host event {EventName} could not be delivered", eventName);
+            }
+        });
+    }
+
+    private int _pushPending;
 
     private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
     {

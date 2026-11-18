@@ -1,5 +1,9 @@
 <Solution>
   <Folder Name="/apps/" />
+  <Folder Name="/apps/branch-gateway/">
+    <Project Path="apps/branch-gateway/Pos.Gateway.Tests/Pos.Gateway.Tests.csproj" />
+    <Project Path="apps/branch-gateway/Pos.Gateway/Pos.Gateway.csproj" />
+  </Folder>
   <Folder Name="/apps/windows-pos/">
     <Project Path="apps/windows-pos/Pos.Core.Tests/Pos.Core.Tests.csproj" />
     <Project Path="apps/windows-pos/Pos.Core/Pos.Core.csproj" />
