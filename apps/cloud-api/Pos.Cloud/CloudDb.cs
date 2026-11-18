@@ -58,6 +58,9 @@ public sealed class ProvisioningCode
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? UsedAt { get; set; }
     public Guid? UsedByGatewayId { get; set; }
+
+    /// <summary>Issued with --replace: registering revokes the branch's currently active gateway (explicit replacement).</summary>
+    public bool ReplacesActive { get; set; }
 }
 
 /// <summary>Per-branch sync checkpoint: highest contiguous accepted sequence. Row-locked while a batch is processed.</summary>
@@ -203,6 +206,8 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.PublicKeySha256).IsUnique();
             e.HasIndex(x => x.BranchId);
+            // At most ONE active gateway per branch, enforced by PostgreSQL (two gateways must never serve one branch).
+            e.HasIndex(x => x.BranchId, "ix_gateway_credentials_one_active_per_branch").IsUnique().HasFilter("revoked_at IS NULL");
             e.Property(x => x.PublicKeySha256).HasMaxLength(64);
             BranchOwned(e);
         });

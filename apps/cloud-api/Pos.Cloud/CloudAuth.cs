@@ -46,9 +46,9 @@ public sealed partial class GatewaySignatureHandler(
         }
 
         var credential = await db.GatewayCredentials.AsNoTracking().SingleOrDefaultAsync(g => g.Id == gatewayId, Context.RequestAborted);
-        if (credential is null || credential.RevokedAt is not null)
+        if (credential is null)
         {
-            return Fail(credential is null ? "unknown gateway" : "revoked gateway");
+            return Fail("unknown gateway");
         }
 
         Request.EnableBuffering(SyncProtocol.MaxBodyBytes);
@@ -65,11 +65,20 @@ public sealed partial class GatewaySignatureHandler(
             return Fail("bad signature");
         }
 
+        if (credential.RevokedAt is not null)
+        {
+            // Told only to the holder of the private key (signature verified above): the gateway fences itself.
+            Context.Items[RevokedMarker] = true;
+            return Fail("revoked gateway");
+        }
+
         var principal = new GatewayPrincipal(credential.Id, credential.OrganizationId, credential.BusinessId, credential.BranchId);
         Context.Items[typeof(GatewayPrincipal)] = principal;
         var identity = new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, credential.Id.ToString())], SyncProtocol.GatewayScheme);
         return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), SyncProtocol.GatewayScheme));
     }
+
+    internal static readonly object RevokedMarker = new();
 
     protected override Task HandleChallengeAsync(AuthenticationProperties properties) => CloudApi.WriteUnauthorized(Context);
 
@@ -220,6 +229,22 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
             throw new CloudException(409, "branch_mismatch", "Ce code a été émis pour une autre succursale que celle de cette passerelle.");
         }
 
+        // One active gateway per branch: a second registration is refused unless the code was issued as an
+        // explicit replacement, which revokes the previous credential in the same transaction (audited in the log).
+        var active = await db.GatewayCredentials
+            .FromSql($"SELECT * FROM gateway_credentials WHERE branch_id = {branchId} AND revoked_at IS NULL FOR UPDATE").ToListAsync(ct);
+        if (active.Count > 0 && !code.ReplacesActive)
+        {
+            throw new CloudException(409, CloudErrorCodes.GatewayAlreadyActive,
+                "Cette succursale a déjà une passerelle active. Émettez un code de remplacement (« gateway-code --replace ») après avoir vérifié que l'ancienne est hors service.");
+        }
+
+        foreach (var previous in active)
+        {
+            previous.RevokedAt = now;
+            LogReplaced(logger, previous.Id, branchId);
+        }
+
         var fingerprint = SyncProtocol.Sha256Hex(publicKey);
         if (await db.GatewayCredentials.AnyAsync(g => g.PublicKeySha256 == fingerprint, ct))
         {
@@ -253,6 +278,9 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
     }
 
     private static CloudException Invalid() => new(401, "invalid_code", "Code de provisionnement invalide, expiré ou déjà utilisé, ou preuve de clé invalide.");
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Gateway {GatewayId} of branch {BranchId} revoked: replaced by a newly registered gateway")]
+    private static partial void LogReplaced(ILogger logger, Guid gatewayId, Guid branchId);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Gateway {GatewayId} registered for branch {BranchId} (business {BusinessId}, organization {OrganizationId})")]
     private static partial void LogRegistered(ILogger logger, Guid gatewayId, Guid branchId, Guid businessId, Guid organizationId);

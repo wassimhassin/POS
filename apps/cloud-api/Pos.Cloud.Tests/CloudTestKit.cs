@@ -198,6 +198,12 @@ public sealed partial class CloudProcess : IAsyncDisposable
         return this;
     }
 
+    public CloudProcess WithoutEnvironment(string name)
+    {
+        _environment.Remove(name);
+        return this;
+    }
+
     public async Task StartAsync()
     {
         var info = Info("run", "--listen", $"https://127.0.0.1:{Port}", "--certificate", CertificatePath);
@@ -270,7 +276,8 @@ public sealed partial class CloudProcess : IAsyncDisposable
     public Guid CreateBranch(Guid businessId, string name, string? id = null) =>
         Guid.Parse(Value(Admin([.. new[] { "branch-create", "--business", businessId.ToString("D"), "--name", name }, .. id is null ? Array.Empty<string>() : ["--id", id]]), "branch_id"));
 
-    public string GatewayCode(Guid branchId) => Value(Admin("gateway-code", "--branch", branchId.ToString("D")), "code");
+    public string GatewayCode(Guid branchId, bool replace = false) =>
+        Value(replace ? Admin("gateway-code", "--branch", branchId.ToString("D"), "--replace") : Admin("gateway-code", "--branch", branchId.ToString("D")), "code");
 
     public string ReportKey(Guid organizationId, Guid? businessId = null, Guid? branchId = null)
     {
@@ -427,11 +434,28 @@ public sealed class BranchUnderTest : IAsyncDisposable
     /// <summary>Writes to the gateway's SQLite file (fault/upgrade simulation by the test).</summary>
     public void ExecuteGatewaySql(string sql)
     {
-        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Gateway.DataDir, "gateway.db"), Pooling = false }.ToString());
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
+        // Right after the gateway process is killed, another process on this Windows host (antivirus/indexer) can
+        // briefly hold the freshly written file: SQLITE_IOERR/BUSY. Test-side only; retried a few times, then fails.
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Gateway.DataDir, "gateway.db"), Pooling = false }.ToString());
+                connection.Open();
+                using var transaction = connection.BeginTransaction();
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = sql;
+                command.ExecuteNonQuery();
+                transaction.Commit();
+                return;
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 10 && attempt < 10)
+            {
+                Console.WriteLine($"ExecuteGatewaySql retry {attempt}: SQLite {ex.SqliteErrorCode}/{ex.SqliteExtendedErrorCode} {ex.Message}");
+                Thread.Sleep(300);
+            }
+        }
     }
 
     /// <summary>Every order of the branch in the cloud equals the gateway's committed state, and each event is stored once.</summary>

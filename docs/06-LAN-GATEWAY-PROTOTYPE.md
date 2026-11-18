@@ -113,6 +113,8 @@ gateway. Local single-till sales ("Vente directe") and local printing still work
 
 ### Proposed controlled recovery procedure (manual, operator-initiated)
 
+> Superseded in Phase 1.5 by [08-BACKUP-RESTORE-RECOVERY.md](08-BACKUP-RESTORE-RECOVERY.md): verified scheduled backups, `restore`, cloud `reconcile`, terminal unpair/replacement.
+
 1. **Restart in place** (most incidents). The Windows Service restarts automatically on crash (5 s, 10 s,
    then 60 s). Terminals reconnect by themselves. Check `Pos.Gateway status` and the logs in `<data>\logs`.
 2. **Corrupt database.** The gateway refuses to start. Stop the service and keep the corrupt file for

@@ -1,9 +1,5 @@
-using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Net.Security;
 using System.Security.Authentication;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
@@ -39,15 +35,16 @@ internal sealed class SyncFailureException : Exception
 /// - Failures back off exponentially (1 s, 2 s, 4 s … up to <see cref="SyncOptions.MaxBackoff"/>, ±20 % jitter).
 /// - Registration with a one-time code is done here, by the gateway's own account (DPAPI-protected key).
 /// - Local operations never wait for the cloud: an internet outage does not affect the branch.
+/// - Recovery safety (Phase 1.5): nothing is appended or sent while the gateway is not in 'normal' state; once per
+///   start it checks whether the cloud holds MORE events than this database (restored copy) and, if so, blocks
+///   shared writes ('cloud_ahead'); a credential revoked by the cloud (gateway replaced) fences this gateway.
 /// </summary>
 public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions options, ILogger<CloudSyncWorker> logger) : BackgroundService
 {
     private const int MaxBatchBytes = 1_500_000;
     private readonly SemaphoreSlim _signal = new(0, 1);
-    private HttpClient? _http;
-    private string? _httpFor;
-    private ECDsa? _key;
-    private string? _keyFor;
+    private readonly CloudClient _cloud = new(store, options.RequestTimeout);
+    private bool _cloudChecked;
 
     /// <summary>Wakes the worker (an event was appended).</summary>
     public void Signal()
@@ -69,27 +66,48 @@ public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions opti
             var more = false;
             try
             {
-                store.PublishCatalogIfChanged();
+                if (!store.GetRecoveryState().IsNormal)
+                {
+                    await IdleAsync(stoppingToken); // recovery: the operator reconciles explicitly (« reconcile »)
+                    continue;
+                }
+
                 var link = store.GetCloudLink();
                 if (link is null)
                 {
+                    store.PublishCatalogIfChanged();
                     await IdleAsync(stoppingToken);
                     continue;
                 }
 
                 if (!link.IsLinked)
                 {
-                    await RegisterAsync(link, stoppingToken);
+                    await _cloud.RegisterAsync(link, stoppingToken);
+                    store.RecordSyncSuccess();
                     failures = 0;
                     continue;
                 }
 
+                if (!_cloudChecked && await CloudIsAheadAsync(link, stoppingToken))
+                {
+                    continue;
+                }
+
+                _cloudChecked = true;
+                store.PublishCatalogIfChanged();
                 more = await PushAsync(link, stoppingToken);
                 failures = 0;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (CloudRevokedException ex)
+            {
+                // Another gateway now serves this branch: stop accepting shared writes here (no split brain).
+                store.SetRecoveryState(RecoveryStatus.Fenced, ex.Message);
+                store.RecordSyncFailure("Le cloud refuse les identifiants de cette passerelle : révoquée (remplacée ?). Modifications partagées suspendues.", null);
+                LogFenced(logger);
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
@@ -140,6 +158,23 @@ public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions opti
         }
     }
 
+    /// <summary>A database restored (or copied) from an older state is behind the cloud: block writes before anything diverges.</summary>
+    private async Task<bool> CloudIsAheadAsync(CloudLink link, CancellationToken ct)
+    {
+        var cloud = await _cloud.GetAsync<SyncCloudState>(link, "/v1/sync/state", ct);
+        var local = store.GetSyncStatus().LastSequence;
+        if (cloud.LastSequence <= local)
+        {
+            return false;
+        }
+
+        store.SetRecoveryState(RecoveryStatus.CloudAhead,
+            $"Le cloud a {cloud.LastSequence} événements pour cette succursale, cette base seulement {local} (restaurée ou copiée ?). " +
+            "Arrêtez la passerelle puis exécutez « Pos.Gateway reconcile ».");
+        LogCloudAhead(logger, cloud.LastSequence, local);
+        return true;
+    }
+
     /// <summary>Sends the next bounded batch. Returns true when more events may be waiting.</summary>
     private async Task<bool> PushAsync(CloudLink link, CancellationToken ct)
     {
@@ -152,15 +187,11 @@ public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions opti
 
         var body = Encoding.UTF8.GetBytes($"{{\"events\":[{string.Join(',', events.Select(e => e.Payload))}]}}");
         store.MarkAttempt(events[0].Sequence, events[^1].Sequence);
-        using var response = await SendSignedAsync(link, "/v1/sync/events", body, ct);
-        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-        {
-            throw new SyncFailureException("Le cloud refuse les identifiants de cette passerelle (révoquée ou inconnue). Les événements restent en attente.");
-        }
-
+        using var response = await _cloud.SendSignedAsync(link, HttpMethod.Post, "/v1/sync/events", body, ct);
+        await CloudClient.ThrowIfRefusedAsync(response, ct);
         if (!response.IsSuccessStatusCode)
         {
-            var error = await ReadErrorAsync(response, ct);
+            var error = await CloudClient.ReadErrorAsync(response, ct);
             throw new SyncFailureException($"Le cloud a répondu {(int)response.StatusCode} ({error}).");
         }
 
@@ -169,6 +200,8 @@ public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions opti
         var localLast = store.GetSyncStatus().LastSequence;
         if (result.LastAcceptedSequence > localLast)
         {
+            store.SetRecoveryState(RecoveryStatus.CloudAhead,
+                $"Le cloud a déjà {result.LastAcceptedSequence} événements, la passerelle seulement {localLast}. Exécutez « Pos.Gateway reconcile ».");
             throw new SyncFailureException(
                 $"Le cloud a déjà {result.LastAcceptedSequence} événements pour cette succursale, la passerelle seulement {localLast} (passerelle restaurée ou remplacée ?). Réconciliation manuelle requise.",
                 localLast + 1);
@@ -198,106 +231,10 @@ public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions opti
         return events.Count == options.BatchSize || events[^1].Sequence < localLast;
     }
 
-    private async Task RegisterAsync(CloudLink link, CancellationToken ct)
-    {
-        var identity = store.GetIdentity() ?? throw new SyncFailureException("Passerelle non initialisée.");
-        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var publicKey = key.ExportSubjectPublicKeyInfo();
-        var signature = key.SignData(SyncProtocol.RegisterPayload(link.PendingCode!, identity.BranchId, publicKey), HashAlgorithmName.SHA256);
-        var request = new RegisterGatewayRequest(link.PendingCode!, identity.BranchId, Convert.ToBase64String(publicKey), Convert.ToBase64String(signature));
-
-        using var response = await Http(link).PostAsJsonAsync("v1/gateways/register", request, SyncProtocol.Json, ct);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new SyncFailureException($"Enregistrement auprès du cloud refusé ({(int)response.StatusCode} {await ReadErrorAsync(response, ct)}). " +
-                "Générez un nouveau code avec « Pos.Cloud gateway-code » puis « Pos.Gateway cloud-link ».");
-        }
-
-        var registration = await response.Content.ReadFromJsonAsync<RegisterGatewayResponse>(SyncProtocol.Json, ct)
-            ?? throw new SyncFailureException("Réponse d'enregistrement vide.");
-        if (registration.BranchId != identity.BranchId)
-        {
-            throw new SyncFailureException($"Le cloud a associé cette passerelle à la succursale {registration.BranchId}, attendu {identity.BranchId}.");
-        }
-
-        var pkcs8 = key.ExportPkcs8PrivateKey();
-        try
-        {
-            store.CompleteCloudLink(registration, pkcs8);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(pkcs8);
-        }
-
-        store.RecordSyncSuccess();
-    }
-
-    private async Task<HttpResponseMessage> SendSignedAsync(CloudLink link, string path, byte[] body, CancellationToken ct)
-    {
-        if (_key is null || _keyFor != link.GatewayId)
-        {
-            _key?.Dispose();
-            _key = GatewayStore.LoadCloudKey(link);
-            _keyFor = link.GatewayId;
-        }
-
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var signature = _key.SignData(SyncProtocol.RequestPayload(link.GatewayId!, "POST", path, timestamp, SyncProtocol.Sha256Hex(body)), HashAlgorithmName.SHA256);
-        using var request = new HttpRequestMessage(HttpMethod.Post, path.TrimStart('/'))
-        {
-            Content = new ByteArrayContent(body) { Headers = { ContentType = new MediaTypeHeaderValue("application/json") } },
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue(SyncProtocol.GatewayScheme,
-            SyncProtocol.AuthorizationParameter(link.GatewayId!, timestamp, signature));
-        return await Http(link).SendAsync(request, ct);
-    }
-
-    /// <summary>HTTPS only. With a pin (development/test certificates) the cloud certificate must match it exactly; otherwise normal CA validation.</summary>
-    private HttpClient Http(CloudLink link)
-    {
-        var key = $"{link.CloudUrl}|{link.CloudPin}";
-        if (_http is not null && _httpFor == key)
-        {
-            return _http;
-        }
-
-        _http?.Dispose();
-        var pin = link.CloudPin is null ? null : Convert.FromHexString(link.CloudPin);
-        var handler = new SocketsHttpHandler
-        {
-            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-            ConnectTimeout = TimeSpan.FromSeconds(10),
-            SslOptions = new SslClientAuthenticationOptions
-            {
-                RemoteCertificateValidationCallback = pin is null
-                    ? null
-                    : (_, certificate, _, _) => certificate is not null && CryptographicOperations.FixedTimeEquals(SHA256.HashData(certificate.GetRawCertData()), pin),
-            },
-        };
-        _http = new HttpClient(handler) { BaseAddress = new Uri(link.CloudUrl), Timeout = options.RequestTimeout };
-        _httpFor = key;
-        return _http;
-    }
-
-    private static async Task<string> ReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
-    {
-        try
-        {
-            var error = await response.Content.ReadFromJsonAsync<CloudError>(SyncProtocol.Json, ct);
-            return error is null ? "?" : $"{error.Code}: {error.Message}";
-        }
-        catch (JsonException)
-        {
-            return "réponse illisible";
-        }
-    }
-
     public override void Dispose()
     {
         base.Dispose();
-        _http?.Dispose();
-        _key?.Dispose();
+        _cloud.Dispose();
         _signal.Dispose();
     }
 
@@ -309,4 +246,10 @@ public sealed partial class CloudSyncWorker(GatewayStore store, SyncOptions opti
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Cloud sync attempt failed ({Failures} in a row): {Reason}. Events stay in the outbox; retrying with backoff.")]
     private static partial void LogFailure(ILogger logger, int failures, string reason);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "The cloud revoked this gateway's credential (replaced?): shared writes are suspended on this gateway")]
+    private static partial void LogFenced(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "The cloud holds {CloudSequence} events for this branch but this database only {LocalSequence}: shared writes blocked until « reconcile »")]
+    private static partial void LogCloudAhead(ILogger logger, long cloudSequence, long localSequence);
 }

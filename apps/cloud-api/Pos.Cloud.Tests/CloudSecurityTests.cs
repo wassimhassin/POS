@@ -92,7 +92,7 @@ public sealed class CloudSecurityTests : IAsyncLifetime
     [Fact]
     public async Task Provisioning_codes_are_single_use_bound_to_one_branch_and_require_key_possession()
     {
-        var code = _cloud.GatewayCode(_branch);
+        var code = _cloud.GatewayCode(_branch, replace: true); // the branch already has an active gateway (setup)
         using var candidate = RawGatewayClient.Unregistered(_cloud);
         using var otherKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
@@ -123,6 +123,7 @@ public sealed class CloudSecurityTests : IAsyncLifetime
         }
 
         Assert.Equal(2, _cloud.Count("SELECT COUNT(*) FROM gateway_credentials WHERE branch_id = @p0", _branch)); // setup + this one
+        Assert.Equal(1, _cloud.Count("SELECT COUNT(*) FROM gateway_credentials WHERE branch_id = @p0 AND revoked_at IS NULL", _branch)); // the replaced one is revoked
         Assert.Equal(0, _cloud.Count("SELECT COUNT(*) FROM provisioning_codes WHERE code_hash = @p0 AND used_at IS NULL", SyncProtocol.Sha256Hex(System.Text.Encoding.UTF8.GetBytes(SyncProtocol.NormalizeCode(code)))));
     }
 

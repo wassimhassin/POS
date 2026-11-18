@@ -7,6 +7,7 @@ interface Props {
   status: GatewayStatus | null;
   onClose: () => void;
   onEnrolled: (message: string) => void;
+  onUnpaired: (message: string) => void;
 }
 
 const input = 'mt-1 h-12 w-full rounded-xl border border-line bg-surface px-3 font-mono text-base';
@@ -15,7 +16,7 @@ const input = 'mt-1 h-12 w-full rounded-xl border border-line bg-surface px-3 fo
  * Pairing: the administrator runs « Pos.Gateway enroll --name … » on the gateway PC, which prints a
  * one-time code and the certificate fingerprint. Both are typed here; nothing secret is stored in the app.
  */
-export function GatewaySetupDialog({ status, onClose, onEnrolled }: Props) {
+export function GatewaySetupDialog({ status, onClose, onEnrolled, onUnpaired }: Props) {
   const [url, setUrl] = useState('https://');
   const [fingerprint, setFingerprint] = useState('');
   const [code, setCode] = useState('');
@@ -23,6 +24,24 @@ export function GatewaySetupDialog({ status, onClose, onEnrolled }: Props) {
   const [busy, setBusy] = useState(false);
   const paired = status !== null && status.state !== 'not_configured';
   const p = presentStatus(status);
+  const [confirmUnpair, setConfirmUnpair] = useState(false);
+  const [discardPending, setDiscardPending] = useState(false);
+  const pending = status?.pendingOperations ?? 0;
+
+  // Replacement or reassignment of this till: forget the pairing AND this till's identity (a new one is created at
+  // the next pairing). The administrator revokes the old identity on the gateway (« replace-terminal »).
+  const unpair = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await call('gateway.unpair', { confirm: true, discardPending });
+      onUnpaired('Poste dissocié : révoquez son ancienne identité sur la passerelle, puis appairez-le à nouveau.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -88,6 +107,36 @@ export function GatewaySetupDialog({ status, onClose, onEnrolled }: Props) {
               {busy ? 'Appairage…' : 'Appairer ce poste'}
             </button>
           </form>
+        )}
+
+        {paired && (
+          <div className="mt-5 rounded-xl border border-line p-4" data-testid="gw-unpair-section">
+            {!confirmUnpair ? (
+              <button type="button" onClick={() => setConfirmUnpair(true)} className="h-12 rounded-xl border border-danger px-4 font-semibold text-danger" data-testid="gw-unpair">
+                Dissocier ce poste…
+              </button>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <p className="text-sm">
+                  Ce poste oubliera la passerelle et son identité. Les commandes partagées restent sur la passerelle.
+                </p>
+                {pending > 0 && (
+                  <label className="flex items-center gap-2 text-sm font-semibold text-danger">
+                    <input type="checkbox" checked={discardPending} onChange={(e) => setDiscardPending(e.target.checked)} data-testid="gw-discard-pending" />
+                    Abandonner {pending} opération(s) sans réponse de la passerelle (elles ont peut-être été appliquées)
+                  </label>
+                )}
+                {error && (
+                  <p className="text-sm font-semibold text-danger" role="alert" data-testid="gw-error">
+                    {error}
+                  </p>
+                )}
+                <button type="button" disabled={busy || (pending > 0 && !discardPending)} onClick={() => void unpair()} className="h-12 rounded-xl bg-danger font-semibold text-white disabled:opacity-50" data-testid="gw-unpair-confirm">
+                  Confirmer la dissociation
+                </button>
+              </div>
+            )}
+          </div>
         )}
 
         <div className="mt-5 flex justify-end">

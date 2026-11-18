@@ -39,6 +39,29 @@ public static class CloudApi
             return Results.Ok(result);
         }).RequireAuthorization(GatewayPolicy);
 
+        // Phase 1.5 recovery: a gateway reads back ITS OWN branch's confirmed events (branch from the credential).
+        app.MapGet("/v1/sync/state", async (HttpContext http, CloudDb db, CancellationToken ct) =>
+        {
+            var gateway = Gateway(http);
+            var state = await db.BranchSyncStates.AsNoTracking().SingleAsync(s => s.BranchId == gateway.BranchId && s.OrganizationId == gateway.OrganizationId, ct);
+            return Results.Ok(new SyncCloudState(state.LastSequence));
+        }).RequireAuthorization(GatewayPolicy);
+
+        app.MapGet("/v1/sync/events", async (long? after, int? limit, HttpContext http, CloudDb db, CancellationToken ct) =>
+        {
+            var gateway = Gateway(http);
+            if (after is null or < 0 || limit is < 1 or > SyncProtocol.MaxBatchEvents)
+            {
+                return Results.BadRequest(new CloudError("invalid_query", $"after >= 0, limit = 1..{SyncProtocol.MaxBatchEvents}."));
+            }
+
+            var state = await db.BranchSyncStates.AsNoTracking().SingleAsync(s => s.BranchId == gateway.BranchId && s.OrganizationId == gateway.OrganizationId, ct);
+            var rows = await db.SyncEvents.AsNoTracking()
+                .Where(e => e.BranchId == gateway.BranchId && e.OrganizationId == gateway.OrganizationId && e.Sequence > after)
+                .OrderBy(e => e.Sequence).Take(limit ?? SyncProtocol.MaxBatchEvents).Select(e => e.Payload).ToListAsync(ct);
+            return Results.Ok(new SyncEventPage(state.LastSequence, [.. rows.Select(p => JsonSerializer.Deserialize<SyncEvent>(p, SyncProtocol.Json)!)]));
+        }).RequireAuthorization(GatewayPolicy);
+
         var reports = app.MapGroup("/v1/reports").RequireAuthorization(ReportPolicy);
 
         reports.MapGet("/organizations/{organizationId:guid}", async (Guid organizationId, HttpContext http, CloudDb db, CancellationToken ct) =>
@@ -155,7 +178,9 @@ public static class CloudApi
             return Task.CompletedTask;
         }
 
-        return WriteError(http, 401, "unauthorized", "Authentification requise ou refusée.");
+        return http.Items.ContainsKey(GatewaySignatureHandler.RevokedMarker)
+            ? WriteError(http, 403, CloudErrorCodes.GatewayRevoked, "Cette passerelle a été révoquée (remplacée ?) : elle ne doit plus servir la succursale.")
+            : WriteError(http, 401, "unauthorized", "Authentification requise ou refusée.");
     }
 
     private static async Task WriteError(HttpContext http, int status, string code, string message)

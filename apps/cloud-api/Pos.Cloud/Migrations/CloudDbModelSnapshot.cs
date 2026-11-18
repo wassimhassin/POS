@@ -399,6 +399,11 @@ namespace Pos.Cloud.Migrations
                     b.HasIndex("OrganizationId", "BusinessId", "BranchId")
                         .HasDatabaseName("ix_gateway_credentials_organization_id_business_id_branch_id");
 
+                    b.HasIndex(new[] { "BranchId" }, "ix_gateway_credentials_one_active_per_branch")
+                        .IsUnique()
+                        .HasDatabaseName("ix_gateway_credentials_one_active_per_branch")
+                        .HasFilter("revoked_at IS NULL");
+
                     b.ToTable("gateway_credentials");
                 });
 
@@ -451,6 +456,10 @@ namespace Pos.Cloud.Migrations
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("uuid")
                         .HasColumnName("organization_id");
+
+                    b.Property<bool>("ReplacesActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("replaces_active");
 
                     b.Property<DateTimeOffset?>("UsedAt")
                         .HasColumnType("timestamp with time zone")

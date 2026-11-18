@@ -60,6 +60,12 @@ public sealed partial class GatewayProcess : IAsyncDisposable
         return this;
     }
 
+    public GatewayProcess WithoutEnvironment(string name)
+    {
+        _environment.Remove(name);
+        return this;
+    }
+
     public async Task StartAsync()
     {
         var info = new ProcessStartInfo(Executable)
@@ -150,6 +156,11 @@ public sealed partial class GatewayProcess : IAsyncDisposable
         foreach (var arg in args.Append("--data-dir").Append(DataDir))
         {
             info.ArgumentList.Add(arg);
+        }
+
+        foreach (var (name, value) in _environment)
+        {
+            info.Environment[name] = value;
         }
 
         using var process = Process.Start(info)!;

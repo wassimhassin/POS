@@ -191,6 +191,7 @@ export interface BridgeCommands {
   'print.jobs.reprint': { request: { jobId: string; confirmDuplicate: boolean }; response: EnqueueResult };
   'gateway.state': { request: Record<string, never>; response: GatewaySnapshot | null };
   'gateway.enroll': { request: { url: string; fingerprint: string; code: string }; response: EnrollResult };
+  'gateway.unpair': { request: { confirm: boolean; discardPending: boolean }; response: GatewaySnapshot | null };
   'shared.create': { request: { operationId: string; label: string | null }; response: OperationResult };
   'shared.addItem': {
     request: { operationId: string; orderId: string; productId: string; quantity: number };

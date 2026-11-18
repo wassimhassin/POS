@@ -264,6 +264,10 @@ function PosScreen({ products: initialProducts, initialDraft }: { products: Prod
             setGatewayDialog(false);
             notify('ok', message);
           }}
+          onUnpaired={(message) => {
+            setGatewayDialog(false);
+            notify('ok', message);
+          }}
         />
       )}
 

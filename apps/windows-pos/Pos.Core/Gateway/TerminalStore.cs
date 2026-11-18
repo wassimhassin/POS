@@ -103,6 +103,30 @@ public sealed class TerminalStore(PosDatabase database)
         insert.ExecuteNonQuery();
     }
 
+    /// <summary>Forgets the link, the identity (new GUID + key at the next pairing) and pending operations. Returns the old terminal id.</summary>
+    public string? Unpair()
+    {
+        using var connection = database.OpenConnection();
+        using var tx = connection.BeginTransaction();
+        string? previous;
+        using (var query = connection.CreateCommand())
+        {
+            query.Transaction = tx;
+            query.CommandText = "SELECT terminal_id FROM terminal_identity WHERE id = 1;";
+            previous = query.ExecuteScalar() as string;
+        }
+
+        using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = tx;
+            delete.CommandText = "DELETE FROM gateway_pending_operations; DELETE FROM gateway_link; DELETE FROM terminal_identity;";
+            delete.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        return previous;
+    }
+
     public void AddPending(string operationId, string type, string description)
     {
         using var connection = database.OpenConnection();

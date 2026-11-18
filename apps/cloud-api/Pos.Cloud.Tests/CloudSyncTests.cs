@@ -211,11 +211,13 @@ public sealed class CloudSyncTests : IAsyncLifetime
 
         // Back to the Phase 1.3 schema (no outbox), as an already-deployed gateway would be.
         await branch.Gateway.KillAsync();
-        branch.ExecuteGatewaySql("DROP TABLE sync_outbox; DROP TABLE cloud_link; DROP TABLE sync_state; DELETE FROM gateway_schema WHERE version = 2;");
+        branch.ExecuteGatewaySql("DROP TABLE recovery_state; DROP TABLE recovery_quarantine; DROP TABLE backup_config; DROP TABLE backup_runs; " +
+            "DROP TABLE sync_outbox; DROP TABLE cloud_link; DROP TABLE sync_state; DELETE FROM gateway_schema WHERE version IN (2, 3);");
         await branch.Gateway.StartAsync();
         await a.WaitConnectedAsync();
 
-        // Migration 2 backfilled one snapshot per existing order (+ the catalog); terminal identities are unchanged.
+        // Migrations 2-3 re-applied: one snapshot per existing order (+ the catalog), recovery state normal; terminal identities unchanged.
+        Assert.Equal(1, branch.Gateway.Count("SELECT COUNT(*) FROM recovery_state WHERE status = 'normal'"));
         Assert.Equal(2, branch.Gateway.Count("SELECT COUNT(*) FROM sync_outbox WHERE type = 'order_imported'"));
         Assert.Equal(1, branch.Gateway.Count("SELECT COUNT(*) FROM terminals WHERE id = @t AND status = 'active'", ("@t", a.TerminalId)));
 

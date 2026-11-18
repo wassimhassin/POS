@@ -157,6 +157,24 @@ public sealed record RegisterGatewayResponse(
 
 public sealed record CloudError(string Code, string Message);
 
+/// <summary>Authenticated gateway errors that the gateway acts on (not only displays).</summary>
+public static class CloudErrorCodes
+{
+    /// <summary>The credential was revoked (e.g. replaced by another gateway): the gateway must stop serving writes.</summary>
+    public const string GatewayRevoked = "gateway_revoked";
+
+    /// <summary>The branch already has an active gateway; issue a code with --replace to replace it explicitly.</summary>
+    public const string GatewayAlreadyActive = "gateway_already_active";
+}
+
+// --- Recovery (Phase 1.5): a gateway reads back ITS OWN branch's confirmed events ---
+
+/// <summary>The cloud checkpoint for the authenticated gateway's branch.</summary>
+public sealed record SyncCloudState(long LastSequence);
+
+/// <summary>Confirmed events after a sequence, in order (GET /v1/sync/events?after=N&amp;limit=M).</summary>
+public sealed record SyncEventPage(long LastSequence, IReadOnlyList<SyncEvent> Events);
+
 // --- Reporting (read-only) ---
 
 public sealed record BranchReport(

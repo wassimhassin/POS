@@ -222,7 +222,7 @@ $env:POS_DATA_DIR = "$env:TEMP\pos-a"; .\scripts\run.ps1 -NoBuild   # repeat wit
 
 In the POS, click the gateway badge (top right) and enter `https://127.0.0.1:7443`, the fingerprint and
 the code, then use **Commandes partagées**. Gateway CLI: `init`, `run`, `enroll`, `terminals`, `revoke`,
-`printer`, `backup`, `status` (all take `--data-dir`). Deployment as a Windows Service:
+`printer`, `backup`, `backup-config`, `restore`, `reconcile`, `recovery-verify`, `quarantine`, `replace-terminal`, `cloud-relink`, `status` (all take `--data-dir`). Deployment as a Windows Service:
 `scripts/install-gateway-service.ps1` (elevated; not executed during this validation).
 
 Key properties: HTTPS only with certificate pinning, per-terminal key pairs (no shared secret), one-time
@@ -250,3 +250,20 @@ synchronized copy for reporting. Design, protocol, failure handling, security an
 dotnet test apps/cloud-api/Pos.Cloud.Tests    # real PostgreSQL + cloud + gateway processes
 node tests/e2e/cloud-sync.mjs                 # POS app + gateway + cloud: offline orders, crash, lost ack
 ```
+
+## Backup, restore and device replacement (Phase 1.5)
+
+Manual, auditable recovery from a failed gateway or terminal: no automatic failover, no guessed outcome.
+Procedures and limitations: [docs/08-BACKUP-RESTORE-RECOVERY.md](docs/08-BACKUP-RESTORE-RECOVERY.md).
+
+- Scheduled, verified SQLite backups with metadata (branch, gateway, schema, sync checkpoint, SHA-256) and
+  retention (`Pos.Gateway backup-config`). A backup on the gateway's own disk is flagged: it is **not**
+  disaster protection.
+- `restore` (gateway stopped, dry-run first) validates checksum, integrity, schema and branch. It refuses
+  to overwrite newer data unless told to, keeps a forensic copy, survives a crash mid-way and blocks
+  shared writes until `reconcile` + `recovery-verify`.
+- `reconcile` imports only events the cloud confirmed (original ids, no duplicates, print jobs
+  `uncertain`, never reprinted automatically), verifies lost acknowledgments by hash and quarantines
+  contradictions.
+- One active gateway per branch in the cloud (`gateway-code --replace`). A replaced gateway is fenced.
+  Tills are replaced with `replace-terminal` or unpaired from the POS (new identity at re-pairing).

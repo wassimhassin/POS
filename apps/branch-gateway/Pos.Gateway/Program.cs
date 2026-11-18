@@ -17,7 +17,14 @@ using Pos.Gateway;
 //   Pos.Gateway terminals
 //   Pos.Gateway revoke   --terminal <terminal id>
 //   Pos.Gateway printer  --destination <kitchen|bar|counter|receipt> (--printer <name> | --none) [--width 58|80]
-//   Pos.Gateway backup   --out <file.db>
+//   Pos.Gateway backup   [--out <file.db>]          verified copy + <file>.db.json metadata (default: configured dir)
+//   Pos.Gateway backup-config --dir <folder or \servershare> [--interval-seconds 3600] [--keep 48]
+//   Pos.Gateway restore  --from <backup.db> [--dry-run] [--branch-id <guid>] [--replace-newer]   (gateway stopped)
+//   Pos.Gateway reconcile [--dry-run]               compare with / import cloud-confirmed events (gateway stopped)
+//   Pos.Gateway recovery-verify [--without-cloud]    end a recovery: shared writes resume
+//   Pos.Gateway quarantine [--resolve <id> --note <decision>]
+//   Pos.Gateway replace-terminal --terminal <old id> --name <new name>   revoke + one-time code for the replacement
+//   Pos.Gateway cloud-relink --url https://<cloud> --code <one-time code> [--pin <sha256>]   new gateway credential
 //   Pos.Gateway status
 //   Pos.Gateway cloud-link --url https://<cloud> --code <one-time code> [--pin <cloud certificate SHA-256>]
 //
@@ -39,8 +46,40 @@ using var loggerFactory = LoggerFactory.Create(b => b
     .AddSimpleConsole(o => o.SingleLine = true));
 var log = loggerFactory.CreateLogger("Pos.Gateway");
 
+InstanceLock? instance = null;
 try
 {
+    // Restore runs before the database is opened (it replaces it) and holds the data-directory lock itself.
+    if (command == "restore")
+    {
+        var plan = GatewayBackup.Restore(dataDir, options.Required("from"),
+            new RestoreOptions(options.Has("dry-run"), options.One("branch-id"), options.Has("replace-newer")), loggerFactory);
+        var b = plan.Backup;
+        Console.WriteLine($"Sauvegarde : succursale {b.BranchName} ({b.BranchId}), créée le {b.CreatedAt} sur {b.SourceMachine}, schéma {b.GatewaySchemaVersion}/{b.PosSchemaVersion}");
+        Console.WriteLine($"Contenu : séquence {b.OutboxLastSequence} (acquittée par le cloud jusqu'à {b.SyncAckedSequence}), opération {b.LastOperationPosition}, SHA-256 {b.Sha256} vérifié, intégrité ok");
+        Console.WriteLine($"Données actuelles : {plan.CurrentState ?? "aucune"}{(plan.CurrentOutboxSequence is { } cur ? $" (séquence {cur}, {plan.CurrentUnsynced} non synchronisés)" : "")}");
+        foreach (var warning in plan.Warnings)
+        {
+            Console.WriteLine($"Avertissement : {warning}");
+        }
+
+        Console.WriteLine(options.Has("dry-run")
+            ? "Simulation : aucune modification."
+            : "Restauration terminée. Modifications partagées BLOQUÉES jusqu'à « reconcile » (si lié au cloud) puis « recovery-verify ». Anciennes données conservées dans forensic\\.");
+        return 0;
+    }
+
+    if (File.Exists(Path.Combine(dataDir, GatewayBackup.RestoreMarker)))
+    {
+        throw new CliException("Une restauration a été interrompue : relancez « Pos.Gateway restore --from <la même sauvegarde> » avant toute autre commande.");
+    }
+
+    // One process serving (or reconciling) a database at a time; acquired before the database is opened.
+    if (command is "run" or "reconcile")
+    {
+        instance = InstanceLock.Acquire(dataDir, command);
+    }
+
     var store = new GatewayStore(dataDir, loggerFactory);
     store.Initialize(); // migrations + SQLite integrity check: a corrupt file stops the gateway here
 
@@ -81,8 +120,111 @@ try
             return 0;
 
         case "backup":
-            store.Backup(options.Required("out"));
-            Console.WriteLine("Sauvegarde vérifiée.");
+        {
+            BackupMetadata metadata;
+            if (options.One("out") is { Length: > 0 } outFile)
+            {
+                metadata = GatewayBackup.Create(store, outFile);
+            }
+            else
+            {
+                var config = GatewayBackup.GetConfig(store) ?? throw new CliException("Aucune destination configurée : --out <fichier.db> ou « backup-config ».");
+                var run = GatewayBackup.RunConfigured(store, config, log);
+                if (run.Status != "ok")
+                {
+                    Console.Error.WriteLine($"Sauvegarde ÉCHOUÉE : {run.Error}");
+                    return 1;
+                }
+
+                metadata = GatewayBackup.Validate(run.File!);
+            }
+
+            Console.WriteLine($"Sauvegarde vérifiée (intégrité, SHA-256 {metadata.Sha256}), séquence {metadata.OutboxLastSequence}.");
+            if (!metadata.Offsite)
+            {
+                Console.WriteLine("Avertissement : même disque que la passerelle — ce n'est PAS une protection contre une panne du disque ou du PC.");
+            }
+
+            return 0;
+        }
+
+        case "backup-config":
+        {
+            var config = GatewayBackup.Configure(store, options.Required("dir"),
+                int.Parse(options.One("interval-seconds") ?? "3600", CultureInfo.InvariantCulture), int.Parse(options.One("keep") ?? "48", CultureInfo.InvariantCulture));
+            Console.WriteLine($"Sauvegardes : {config.Directory}, toutes les {config.IntervalSeconds} s, {config.Keep} conservées (appliqué par la passerelle en cours d'exécution).");
+            if (!GatewayBackup.IsOffsite(dataDir, config.Directory))
+            {
+                Console.WriteLine("Avertissement : même disque que la passerelle — ce n'est PAS une protection contre une panne. Utilisez un partage réseau (\\\\serveur\\partage) ou un autre support.");
+            }
+
+            return 0;
+        }
+
+        case "reconcile":
+        {
+            using var cloud = new CloudClient(store, TimeSpan.FromSeconds(30));
+            var printQueue = new PrintQueue(store.Database, loggerFactory.CreateLogger<PrintQueue>());
+            var report = await GatewayReconciler.RunAsync(store, printQueue, cloud, options.Has("dry-run"), CancellationToken.None);
+            Console.WriteLine($"Local : séquence {report.LocalSequenceBefore} (acquittée {report.AckedBefore}) — cloud : {report.CloudSequence}");
+            Console.WriteLine($"Vérifiés (accusés perdus) : {report.VerifiedUnacknowledged} ; importés depuis le cloud : {report.Imported} (dont {report.ImportedSubmissions} envois, {report.UncertainPrintJobs} tickets marqués incertains)");
+            Console.WriteLine($"Événements uniquement locaux (à synchroniser) : {report.LocalOnlyEvents}");
+            foreach (var q in report.Quarantined)
+            {
+                Console.WriteLine($"QUARANTAINE (bloquant) : {q}");
+            }
+
+            foreach (var n in report.Notes)
+            {
+                Console.WriteLine($"Note : {n}");
+            }
+
+            Console.WriteLine("Les opérations faites sur l'ancienne passerelle après sa dernière synchronisation et absentes de la sauvegarde ne sont connues de personne : elles ne peuvent pas être récupérées.");
+            Console.WriteLine(report.DryRun ? "Simulation : aucune modification." : $"État : {report.StateAfter}");
+            return report.Quarantined.Count == 0 ? 0 : 3;
+        }
+
+        case "recovery-verify":
+        {
+            var state = store.VerifyRecovery(options.Has("without-cloud"));
+            Console.WriteLine($"Récupération vérifiée : état {state.Status}. Les modifications partagées reprennent.");
+            return 0;
+        }
+
+        case "quarantine":
+            if (options.One("resolve") is { Length: > 0 } resolveId)
+            {
+                var resolved = store.ResolveQuarantine(long.Parse(resolveId, CultureInfo.InvariantCulture), options.Required("note"));
+                Console.WriteLine(resolved ? "Décision enregistrée (élément conservé)." : "Élément introuvable ou déjà résolu.");
+                return resolved ? 0 : 1;
+            }
+
+            foreach (var q in store.ListQuarantine())
+            {
+                Console.WriteLine($"#{q.Id} {(q.Blocking ? "BLOQUANT" : "info")} {q.Kind} seq={q.Sequence?.ToString(CultureInfo.InvariantCulture) ?? "-"} {q.Detail}" +
+                    (q.ResolvedAt is null ? "" : $" — résolu le {q.ResolvedAt} : {q.Resolution}"));
+            }
+
+            return 0;
+
+        case "replace-terminal":
+        {
+            // Lost/broken till: revoke its identity, issue a one-time code for the replacement (new identity, new key).
+            var old = options.Required("terminal");
+            var known = store.GetTerminal(old) ?? throw new CliException("Terminal introuvable.");
+            var wasActive = store.RevokeTerminal(old);
+            var (replacementCode, replacementExpires) = store.CreateEnrollmentCode(options.Required("name"), TimeSpan.FromMinutes(15));
+            GatewayStore.Audit(dataDir, "terminal_replaced", new { old, oldName = known.Name, wasActive, replacement = options.Required("name") });
+            Console.WriteLine($"Terminal {known.Name} ({old}) révoqué{(wasActive ? "" : " (l'était déjà)")} : il ne peut plus se connecter.");
+            Console.WriteLine($"Code d'appairage : {replacementCode}");
+            Console.WriteLine($"Empreinte        : {GatewayCertificate.FormatFingerprint(Cli.ReadFingerprint(dataDir))}");
+            Console.WriteLine($"Expire           : {replacementExpires.ToLocalTime():HH:mm} (usage unique)");
+            return 0;
+        }
+
+        case "cloud-relink":
+            store.RelinkCloud(options.Required("url"), options.Required("code"), options.One("pin"));
+            Console.WriteLine("Nouvelle liaison enregistrée (l'ancienne est conservée dans l'audit). Exécutez « reconcile » : il enregistre cette passerelle puis compare avec le cloud.");
             return 0;
 
         case "status":
@@ -101,6 +243,28 @@ try
             if (sync.LastError is not null)
             {
                 Console.WriteLine($"Erreur ({sync.ConsecutiveFailures} échecs consécutifs{(sync.BlockedSequence is { } b ? $", bloquée à la séquence {b}" : "")}) : {sync.LastError}");
+            }
+
+            var recovery = store.GetRecoveryState();
+            Console.WriteLine(recovery.IsNormal
+                ? "Récupération : aucune (service normal)."
+                : $"RÉCUPÉRATION EN COURS : {recovery.Status} depuis {recovery.Since} — modifications partagées bloquées. {recovery.Reason}");
+            var pendingQuarantine = store.ListQuarantine(unresolvedOnly: true);
+            if (pendingQuarantine.Count > 0)
+            {
+                Console.WriteLine($"Quarantaine : {pendingQuarantine.Count} élément(s) non résolu(s), dont {pendingQuarantine.Count(q => q.Blocking)} bloquant(s).");
+            }
+
+            var backupConfig = GatewayBackup.GetConfig(store);
+            var (lastOk, lastFailed) = GatewayBackup.LastRuns(store);
+            Console.WriteLine(backupConfig is null
+                ? "Sauvegardes : non configurées (« backup-config --dir <dossier> »)."
+                : $"Sauvegardes : {backupConfig.Directory}, toutes les {backupConfig.IntervalSeconds} s, {backupConfig.Keep} conservées" +
+                  (GatewayBackup.IsOffsite(dataDir, backupConfig.Directory) ? "." : " — MÊME DISQUE : pas une protection contre une panne."));
+            Console.WriteLine($"Dernière sauvegarde réussie : {(lastOk is null ? "aucune" : $"{lastOk.FinishedAt} (séquence {lastOk.Sequence}) {lastOk.File}")}");
+            if (lastFailed is not null && string.CompareOrdinal(lastFailed.StartedAt, lastOk?.StartedAt ?? "") > 0)
+            {
+                Console.WriteLine($"DERNIÈRE SAUVEGARDE EN ÉCHEC : {lastFailed.StartedAt} — {lastFailed.Error}");
             }
 
             return 0;
@@ -128,6 +292,10 @@ catch (Exception ex)
     log.LogCritical(ex, "Gateway {Command} failed", command);
     Console.Error.WriteLine(ex.Message);
     return 1;
+}
+finally
+{
+    instance?.Dispose();
 }
 
 static async Task<int> RunAsync(GatewayStore store, Cli options, string dataDir, ILoggerFactory loggerFactory, ILogger log)
@@ -209,6 +377,12 @@ static async Task<int> RunAsync(GatewayStore store, Cli options, string dataDir,
 #endif
     builder.Services.AddSingleton(orders);
     builder.Services.AddHostedService(_ => new PrintWorkerService(printWorker));
+    builder.Services.AddHostedService(_ => new BackupWorker(store, loggerFactory.CreateLogger<BackupWorker>(), TimeProvider.System));
+    var recovery = store.GetRecoveryState();
+    if (!recovery.IsNormal)
+    {
+        log.LogWarning("Gateway starting in recovery state {RecoveryStatus}: shared writes are blocked. {Reason}", recovery.Status, recovery.Reason);
+    }
 
     builder.Services.AddAuthentication(TerminalTokenHandler.SchemeName)
         .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, TerminalTokenHandler>(TerminalTokenHandler.SchemeName, null);

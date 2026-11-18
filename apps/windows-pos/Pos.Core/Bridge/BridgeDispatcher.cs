@@ -127,6 +127,17 @@ public sealed partial class BridgeDispatcher
                 Read<EmptyPayload>(p);
                 return gateway?.Snapshot();
             },
+            ["gateway.unpair"] = p =>
+            {
+                var req = Read<GatewayUnpairPayload>(p);
+                if (!req.Confirm)
+                {
+                    throw new PosValidationException("confirmation_required", "Confirmez la dissociation de ce terminal.");
+                }
+
+                Gateway().Unpair(req.DiscardPending);
+                return Gateway().Snapshot();
+            },
         };
 
         // Network-bound commands. Operation IDs come from the UI (one per operator action), so a retried
@@ -336,6 +347,8 @@ public sealed partial class BridgeDispatcher
     private sealed record HostEvent(int V, string Event, object? Payload);
 
     private sealed record GatewayEnrollPayload(string Url, string Fingerprint, string Code);
+
+    private sealed record GatewayUnpairPayload(bool Confirm, bool DiscardPending);
 
     private sealed record SharedCreatePayload(string OperationId, string? Label);
 

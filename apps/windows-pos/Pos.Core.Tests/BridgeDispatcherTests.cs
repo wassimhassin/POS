@@ -53,7 +53,7 @@ public sealed class BridgeDispatcherTests : IDisposable
                 "print.destinations.list", "print.destinations.update", "print.jobs.list", "print.jobs.preview",
                 "print.jobs.reprint", "print.jobs.retry", "print.receipt", "print.tickets",
                 "printers.list", "products.list", "routing.update",
-                "gateway.enroll", "gateway.state", "shared.addItem", "shared.create", "shared.setQuantity", "shared.submit",
+                "gateway.enroll", "gateway.state", "gateway.unpair", "shared.addItem", "shared.create", "shared.setQuantity", "shared.submit",
             }.Order(StringComparer.Ordinal),
             _dispatcher.Commands.Order(StringComparer.Ordinal));
     }

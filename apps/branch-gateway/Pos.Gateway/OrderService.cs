@@ -259,6 +259,9 @@ public sealed partial class OrderService(GatewayStore store, PrintQueue printQue
                     : new OperationResolution(operationId, OperationStatus.Abandoned, null);
             }
 
+            // During a recovery an unknown id may be an operation the cloud confirmed but this database does not have
+            // yet: burning it now would contradict the cloud. It stays unresolved (pending on the terminal) until then.
+            GatewayStore.RequireNormal(connection, tx);
             using var insert = GatewayStore.Command(connection, tx, """
                 INSERT INTO operations (operation_id, terminal_id, type, status, at) VALUES ($op, $terminal, 'resolve', 'abandoned', $now);
                 """);
@@ -297,7 +300,10 @@ public sealed partial class OrderService(GatewayStore store, PrintQueue printQue
             var existing = FindOperation(connection, tx, operationId);
             if (existing is not null)
             {
-                if (existing.TerminalId != session.TerminalId || existing.Status == OperationStatus.Applied && existing.RequestHash != requestHash)
+                // RequestHash NULL = operation imported from the cloud during a recovery (request body unknown): same
+                // id from the same terminal is a replay of that confirmed operation.
+                if (existing.TerminalId != session.TerminalId
+                    || existing.Status == OperationStatus.Applied && existing.RequestHash is not null && existing.RequestHash != requestHash)
                 {
                     throw new GatewayException(409, "idempotency_key_reused", "Cet identifiant d'opération a déjà été utilisé pour une autre requête.");
                 }
@@ -311,6 +317,7 @@ public sealed partial class OrderService(GatewayStore store, PrintQueue printQue
                 return Replay(existing);
             }
 
+            GatewayStore.RequireNormal(connection, tx); // shared writes wait for a verified recovery
             var now = store.Now();
             long position;
             using (var insert = GatewayStore.Command(connection, tx, """

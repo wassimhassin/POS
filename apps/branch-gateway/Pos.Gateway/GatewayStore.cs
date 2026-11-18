@@ -157,6 +157,55 @@ public sealed partial class GatewayStore
 
         INSERT INTO sync_state (id) VALUES (1);
         """,
+        // Phase 1.5: backup, restore, recovery.
+        """
+        -- Anything other than 'normal' blocks shared writes (and their idempotency resolution) until an operator
+        -- verifies the recovery: restored (from a backup), cloud_ahead (the cloud holds events this database does not),
+        -- reconciled (cloud-confirmed events imported, awaiting verification), fenced (credential revoked: replaced).
+        CREATE TABLE recovery_state (
+            id        INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            status    TEXT    NOT NULL CHECK (status IN ('normal', 'restored', 'cloud_ahead', 'reconciled', 'fenced')),
+            reason    TEXT    NULL,
+            since     TEXT    NULL,
+            backup_id TEXT    NULL
+        );
+
+        INSERT INTO recovery_state (id, status) VALUES (1, 'normal');
+
+        -- Differences found during recovery, kept for an operator decision (never discarded). blocking = 1 keeps
+        -- the gateway out of 'normal' until resolved.
+        CREATE TABLE recovery_quarantine (
+            id          INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            kind        TEXT    NOT NULL,
+            blocking    INTEGER NOT NULL CHECK (blocking IN (0, 1)),
+            sequence    INTEGER NULL,
+            event_id    TEXT    NULL,
+            detail      TEXT    NOT NULL,
+            payload     TEXT    NULL,
+            created_at  TEXT    NOT NULL,
+            resolved_at TEXT    NULL,
+            resolution  TEXT    NULL
+        );
+
+        CREATE TABLE backup_config (
+            id               INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            directory        TEXT    NOT NULL,
+            interval_seconds INTEGER NOT NULL CHECK (interval_seconds BETWEEN 10 AND 604800),
+            keep             INTEGER NOT NULL CHECK (keep BETWEEN 1 AND 1000)
+        );
+
+        CREATE TABLE backup_runs (
+            id          INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            started_at  TEXT    NOT NULL,
+            finished_at TEXT    NULL,
+            status      TEXT    NOT NULL CHECK (status IN ('ok', 'failed')),
+            file        TEXT    NULL,
+            sha256      TEXT    NULL,
+            sequence    INTEGER NULL,
+            offsite     INTEGER NULL,
+            error       TEXT    NULL
+        );
+        """,
     ];
 
     private const string CodeAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"; // no I/L/O/U/0/1 look-alikes
@@ -355,31 +404,6 @@ public sealed partial class GatewayStore
         update.Parameters.AddWithValue("$id", terminalId);
         update.Parameters.AddWithValue("$now", Now());
         update.ExecuteNonQuery();
-    }
-
-    /// <summary>Transactionally consistent online copy (SQLite backup API), verified with integrity_check.</summary>
-    public void Backup(string destinationFile)
-    {
-        var target = Path.GetFullPath(destinationFile);
-        if (File.Exists(target))
-        {
-            throw new PosValidationException("backup_exists", $"Le fichier existe déjà : {target}");
-        }
-
-        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        using (var source = Database.OpenConnection())
-        using (var destination = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = target, Pooling = false }.ToString()))
-        {
-            destination.Open();
-            source.BackupDatabase(destination);
-            var check = Convert.ToString(Scalar(destination, null, "PRAGMA integrity_check;"), CultureInfo.InvariantCulture);
-            if (check != "ok")
-            {
-                throw new InvalidOperationException($"Backup integrity check failed: {check}");
-            }
-        }
-
-        _logger.LogInformation("Backup written {BackupFile}", target);
     }
 
     internal static string HashCode(string normalizedCode) =>

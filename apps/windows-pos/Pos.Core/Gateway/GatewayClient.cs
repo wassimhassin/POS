@@ -66,6 +66,7 @@ public sealed partial class GatewayClient : IAsyncDisposable
     private HttpClient? _http;
     private GatewayLink? _link;
     private string? _token;
+    private CancellationTokenSource? _session; // the current connection; cancelled by an unpair
 
     public GatewayClient(TerminalStore store, ILogger<GatewayClient> logger)
     {
@@ -174,6 +175,50 @@ public sealed partial class GatewayClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Unpairs this till (replacement, reassignment): forgets the gateway link AND the terminal identity, so a later
+    /// pairing registers a NEW identity and key (the old one should be revoked on the gateway). Shared orders live on
+    /// the gateway and are untouched; local settings stay. Operations still awaiting the gateway's answer are not
+    /// dropped silently: unpairing is refused unless the operator explicitly confirms abandoning them (logged).
+    /// </summary>
+    public void Unpair(bool discardPending)
+    {
+        var pending = _store.ListPending();
+        if (pending.Count > 0 && !discardPending)
+        {
+            throw new PosValidationException("pending_operations",
+                $"{pending.Count} opération(s) partagée(s) attendent encore la réponse de la passerelle. Reconnectez ce terminal pour les résoudre, " +
+                "ou confirmez explicitement leur abandon (elles ont peut-être été appliquées par la passerelle).");
+        }
+
+        foreach (var p in pending)
+        {
+            LogPendingAbandoned(_logger, p.OperationId, p.Type, p.Description);
+        }
+
+        var previous = _store.Unpair();
+        CancellationTokenSource? session;
+        lock (_gate)
+        {
+            _link = null;
+            _token = null;
+            _orders = new(StringComparer.Ordinal);
+            _status = NewStatus(GatewayState.NotConfigured, null);
+            session = _session;
+        }
+
+        try
+        {
+            session?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        LogUnpaired(_logger, previous ?? "?", pending.Count);
+        RaiseChanged();
+    }
+
     // ------------------------------------------------------------------ connection loop
 
     /// <summary>Keeps the terminal connected for its whole lifetime (never gives up, never switches gateway).</summary>
@@ -198,10 +243,16 @@ public sealed partial class GatewayClient : IAsyncDisposable
 
             SetStatus(failures == 0 ? GatewayState.Connecting : GatewayState.Offline, failures == 0 ? null : _status.LastError);
             HubConnection? hub = null;
+            using var session = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_gate)
+            {
+                _session = session;
+            }
+
             try
             {
                 _http ??= CreateHttpClient(new Uri(link.GatewayUrl), link.CertificateSha256);
-                await AuthenticateAsync(link, ct).ConfigureAwait(false);
+                await AuthenticateAsync(link, session.Token).ConfigureAwait(false);
 
                 var closed = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
                 hub = BuildHub(link);
@@ -211,16 +262,16 @@ public sealed partial class GatewayClient : IAsyncDisposable
                     closed.TrySetResult(ex);
                     return Task.CompletedTask;
                 };
-                await hub.StartAsync(ct).ConfigureAwait(false);
+                await hub.StartAsync(session.Token).ConfigureAwait(false);
 
                 // Subscribed first, then snapshot: no update can fall in between.
-                await ResolvePendingAsync(link, ct).ConfigureAwait(false);
-                await RefreshAsync(link, ct).ConfigureAwait(false);
+                await ResolvePendingAsync(link, session.Token).ConfigureAwait(false);
+                await RefreshAsync(link, session.Token).ConfigureAwait(false);
                 failures = 0;
                 SetStatus(GatewayState.Connected, null);
                 LogConnected(_logger, link.GatewayUrl);
 
-                var reason = await closed.Task.WaitAsync(ct).ConfigureAwait(false);
+                var reason = await closed.Task.WaitAsync(session.Token).ConfigureAwait(false);
                 LogDisconnected(_logger, reason?.Message ?? "closed by gateway");
                 failures = 1; // stay "offline" (not "connecting") until a reconnection actually succeeds
                 SetStatus(GatewayState.Offline, "Connexion à la passerelle perdue.");
@@ -228,6 +279,14 @@ public sealed partial class GatewayClient : IAsyncDisposable
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
+            }
+            catch (OperationCanceledException) when (session.IsCancellationRequested)
+            {
+                // Unpaired: drop this connection; the loop waits for a new pairing.
+                _http?.Dispose();
+                _http = null;
+                failures = 0;
+                continue;
             }
 #pragma warning disable CA1031 // The loop must survive any network/protocol failure and keep retrying.
             catch (Exception ex)
@@ -345,6 +404,13 @@ public sealed partial class GatewayClient : IAsyncDisposable
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
                 _store.RemovePending(pending.OperationId);
+                continue;
+            }
+
+            if (response.StatusCode == HttpStatusCode.Locked)
+            {
+                // The gateway is recovering: the outcome cannot be decided yet. Kept pending (never guessed).
+                AddNotice("warning", $"Opération interrompue « {pending.Description} » : en attente de la fin de la récupération de la passerelle.");
                 continue;
             }
 
@@ -604,6 +670,12 @@ public sealed partial class GatewayClient : IAsyncDisposable
         _linkChanged.Dispose();
         _disposed.Dispose();
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Terminal {TerminalId} unpaired; {Abandoned} pending operations abandoned by the operator")]
+    private static partial void LogUnpaired(ILogger logger, string terminalId, int abandoned);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Pending operation abandoned at unpair: {OperationId} ({OperationType}) {Description}")]
+    private static partial void LogPendingAbandoned(ILogger logger, string operationId, string operationType, string description);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Terminal {TerminalId} enrolled as {TerminalName} in branch {BranchName} via {GatewayUrl}")]
     private static partial void LogEnrolled(ILogger logger, string terminalId, string terminalName, string branchName, Uri gatewayUrl);

@@ -15,7 +15,8 @@ using Pos.Sync;
 //   Pos.Cloud org-create      --name <name> [--id <guid>]
 //   Pos.Cloud business-create --org <guid> --name <name> [--id <guid>]
 //   Pos.Cloud branch-create   --business <guid> --name <name> [--id <existing gateway branch id>]
-//   Pos.Cloud gateway-code    --branch <guid> [--minutes 15]            one-time gateway provisioning code
+//   Pos.Cloud gateway-code    --branch <guid> [--minutes 15] [--replace] one-time gateway provisioning code; --replace
+//                                                                       revokes the branch's active gateway on use
 //   Pos.Cloud gateways        [--branch <guid>]
 //   Pos.Cloud gateway-revoke  --gateway <guid>
 //   Pos.Cloud report-key      --org <guid> [--business <guid> [--branch <guid>]] --name <name>
@@ -106,10 +107,12 @@ try
                 BranchId = branch.Id,
                 CreatedAt = DateTimeOffset.UtcNow,
                 ExpiresAt = expiresAt,
+                ReplacesActive = options.Has("replace"),
             });
             await db.SaveChangesAsync();
             Console.WriteLine($"code={code}");
             Console.WriteLine($"expires_at={expiresAt:O}");
+            Console.WriteLine($"replaces_active={(options.Has("replace") ? 1 : 0)}");
             return 0;
         }
 
@@ -328,6 +331,8 @@ internal sealed class Cli
 
         return cli;
     }
+
+    public bool Has(string name) => _values.ContainsKey(name);
 
     public string? One(string name) => _values.TryGetValue(name, out var v) ? v[^1] : null;
 
