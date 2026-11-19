@@ -219,7 +219,9 @@ public sealed class CloudRecoveryTests : IAsyncLifetime
 
         // The old gateway (still running, e.g. repaired and switched on again) is refused by the cloud and fences
         // itself: it stops accepting shared writes instead of diverging from the replacement.
-        await BranchUnderTest.PlaceAsync(a, submit: false);
+        // One write only: its outbox event is pushed at once, refused (403 gateway_revoked) and fences the gateway. A
+        // second write could already be refused (recovery_in_progress) if that round trip wins, which is the point.
+        await a.Client.CreateOrderAsync(Wait.NewId(), null);
         await Wait.UntilAsync(() => Scalar(branch, "SELECT status FROM recovery_state") == "fenced", "old gateway fenced", 45);
         var fenced = await Assert.ThrowsAsync<PosValidationException>(() => a.Client.CreateOrderAsync(Wait.NewId(), null));
         Assert.Equal("recovery_in_progress", fenced.Code);

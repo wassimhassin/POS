@@ -1,0 +1,129 @@
+# Regular CI: UI checks, .NET tests (Debug and Release) and the end-to-end tests.
+# Reliability/load scenarios are NOT part of this workflow (see reliability.yml, manual only).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per branch/PR at a time: a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+  # Opt-in suites stay off even if a repository variable sets them.
+  POS_RELIABILITY: ""
+
+jobs:
+  ui:
+    name: UI (typecheck, Vitest, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/pos-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/pos-web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  dotnet:
+    name: .NET ${{ matrix.configuration }}
+    # WPF/WebView2 and the gateway (Windows service, DPAPI) target net10.0-windows.
+    runs-on: windows-2025
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'apps/Directory.Build.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Locate PostgreSQL (preinstalled, service stopped; tests start private clusters)
+        shell: pwsh
+        run: |
+          if (-not $env:PGBIN -or -not (Test-Path (Join-Path $env:PGBIN 'pg_ctl.exe'))) {
+            throw "PostgreSQL binaries not found (PGBIN='$env:PGBIN'): the cloud integration tests need initdb/pg_ctl."
+          }
+          & (Join-Path $env:PGBIN 'pg_ctl.exe') --version
+          "POS_PG_BIN=$env:PGBIN" >> $env:GITHUB_ENV
+      - run: dotnet restore PosSaaS.slnx
+      - run: dotnet build PosSaaS.slnx -c ${{ matrix.configuration }} --no-restore
+      # Test projects run one after another (no project-level parallelism) to bound memory and processes.
+      - run: dotnet test PosSaaS.slnx -c ${{ matrix.configuration }} --no-build -m:1 --logger trx --results-directory TestResults
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-${{ matrix.configuration }}
+          path: TestResults
+          retention-days: 7
+
+  e2e:
+    name: End-to-end
+    # Only after the unit/integration suites pass: E2E is the most expensive job.
+    needs: [ui, dotnet]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/pos-web/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'apps/Directory.Build.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Locate PostgreSQL and check the WebView2 runtime
+        shell: pwsh
+        run: |
+          if (-not $env:PGBIN -or -not (Test-Path (Join-Path $env:PGBIN 'pg_ctl.exe'))) { throw "PostgreSQL binaries not found (PGBIN)." }
+          "POS_PG_BIN=$env:PGBIN" >> $env:GITHUB_ENV
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $version = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).pv
+          if (-not $version) { throw "WebView2 Runtime not found on this runner image: the desktop E2E tests need it." }
+          "WebView2 Runtime $version"
+      - name: Build UI + solution (Debug)
+        shell: pwsh
+        run: ./scripts/build.ps1 -Configuration Debug
+      - name: Build solution (Release)
+        run: dotnet build PosSaaS.slnx -c Release
+      - name: E2E tests (sequential)
+        shell: pwsh
+        run: |
+          $failed = @()
+          Get-ChildItem tests/e2e -Filter '*.mjs' | Where-Object Name -ne 'lib.mjs' | ForEach-Object {
+            Write-Host "`n==> E2E $($_.BaseName)"
+            node $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $_.BaseName }
+          }
+          if ($failed) { throw "E2E failed: $($failed -join ', ')" }

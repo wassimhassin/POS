@@ -41,6 +41,8 @@ export function cloudExe(configuration = 'Debug') {
 /** Locates the PostgreSQL binaries (POS_PG_BIN, else the newest C:\Program Files\PostgreSQL\<n>\bin). */
 export function postgresBin() {
   if (process.env.POS_PG_BIN) return process.env.POS_PG_BIN;
+  // GitHub's Windows runners preinstall PostgreSQL (service stopped) and expose its bin folder as PGBIN.
+  if (process.env.PGBIN && existsSync(path.join(process.env.PGBIN, 'pg_ctl.exe'))) return process.env.PGBIN;
   const root = path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'PostgreSQL');
   const versions = existsSync(root)
     ? readdirSync(root).filter((v) => existsSync(path.join(root, v, 'bin', 'pg_ctl.exe'))).sort((a, b) => Number(b) - Number(a))

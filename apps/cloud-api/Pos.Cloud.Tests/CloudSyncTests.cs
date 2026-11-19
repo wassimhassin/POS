@@ -96,18 +96,27 @@ public sealed class CloudSyncTests : IAsyncLifetime
             orders.Add(await BranchUnderTest.PlaceAsync(a, submit: i % 3 != 0));
         }
 
-        // Linking starts draining ~70 events one by one; the cloud is killed in the middle of it.
-        await branch.LinkAsync(_cloud);
-        await Wait.UntilAsync(() => _cloud.Count("SELECT last_sequence FROM branch_sync_states WHERE branch_id = @p0", branch.BranchId) >= 5, "sync under way");
+        // Linking starts draining ~70 events one by one; the cloud is killed in the middle of it. Each reply is held
+        // 150 ms by a relay, so the drain takes ≥ 10 s and the kill deterministically lands mid-backlog (without the
+        // relay, a loaded machine could poll late and find the backlog already drained).
+        await using var relay = new TcpProxy(_cloud.Port) { ResponseDelay = TimeSpan.FromMilliseconds(150) };
+        branch.Gateway.Run("cloud-link", "--url", relay.Url, "--code", _cloud.GatewayCode(branch.BranchId), "--pin", _cloud.Fingerprint);
+        // Kill at the first committed event: the remaining ~66 single-event batches still need ≥ 10 s, a wide margin
+        // over polling and kill latency. Reaching that point is slow under load (every relayed reply is held), hence 90 s.
+        await Wait.UntilAsync(() => _cloud.Count("SELECT last_sequence FROM branch_sync_states WHERE branch_id = @p0", branch.BranchId) >= 1, "sync under way", 90);
         await _cloud.KillAsync();
 
         // Whatever was in flight: the cloud's checkpoint equals its stored events (no partial batch), and the
         // gateway never acknowledged more than the cloud committed.
         var cloudLast = _cloud.Count("SELECT last_sequence FROM branch_sync_states WHERE branch_id = @p0", branch.BranchId);
         Assert.Equal(cloudLast, _cloud.Count("SELECT COUNT(*) FROM sync_events WHERE branch_id = @p0", branch.BranchId));
-        Assert.True(branch.AckedSequence <= cloudLast);
-        Assert.True(cloudLast < branch.OutboxCount);
+        var acked = branch.AckedSequence;
+        var outbox = branch.OutboxCount;
+        Assert.True(acked <= cloudLast, $"Gateway acknowledged {acked} but the cloud committed only {cloudLast}.");
+        // Precondition of the scenario (timing): the kill landed before the whole backlog was drained.
+        Assert.True(cloudLast < outbox, $"The backlog was fully drained ({cloudLast}/{outbox}) before the cloud was killed.");
 
+        relay.ResponseDelay = TimeSpan.Zero;
         await _cloud.StartAsync();
         await branch.WaitSyncedAsync(_cloud, 60);
         await branch.AssertCloudMatchesAsync(_cloud, orders);

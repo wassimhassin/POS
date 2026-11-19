@@ -1,0 +1,1414 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "PosSaaS Cloud API",
+    "description": "Branch gateway synchronization and read-only reports. Every error body is the envelope { \"code\", \"message\" }: clients act on `code`; `message` is human-readable (French). Out-of-scope and non-existent resources are both 404.",
+    "version": "v1"
+  },
+  "paths": {
+    "/v1/gateways/register": {
+      "post": {
+        "tags": [
+          "Gateways"
+        ],
+        "summary": "Register a gateway with a one-time provisioning code and proof of key possession.",
+        "operationId": "RegisterGateway",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterGatewayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterGatewayResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sync/events": {
+      "post": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "Deliver the next contiguous batch of the authenticated gateway's branch events (idempotent).",
+        "operationId": "PushSyncEvents",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncBatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncBatchResult"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "PosGateway": [ ]
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "Confirmed events of the authenticated gateway's branch after a sequence (recovery).",
+        "operationId": "ListSyncEvents",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncEventPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "PosGateway": [ ]
+          }
+        ]
+      }
+    },
+    "/v1/sync/state": {
+      "get": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "Last sequence the cloud confirmed for the authenticated gateway's branch.",
+        "operationId": "GetSyncState",
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncCloudState"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "PosGateway": [ ]
+          }
+        ]
+      }
+    },
+    "/v1/reports/organizations/{organizationId}": {
+      "get": {
+        "tags": [
+          "Reports"
+        ],
+        "summary": "Organization summary: businesses and branches with sync freshness.",
+        "operationId": "GetOrganizationReport",
+        "parameters": [
+          {
+            "name": "organizationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ReportKey": [ ]
+          }
+        ]
+      }
+    },
+    "/v1/reports/businesses/{businessId}": {
+      "get": {
+        "tags": [
+          "Reports"
+        ],
+        "summary": "Business summary: its branches with sync freshness.",
+        "operationId": "GetBusinessReport",
+        "parameters": [
+          {
+            "name": "businessId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BusinessReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ReportKey": [ ]
+          }
+        ]
+      }
+    },
+    "/v1/reports/branches/{branchId}": {
+      "get": {
+        "tags": [
+          "Reports"
+        ],
+        "summary": "Branch summary with sync freshness.",
+        "operationId": "GetBranchReport",
+        "parameters": [
+          {
+            "name": "branchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ReportKey": [ ]
+          }
+        ]
+      }
+    },
+    "/v1/reports/branches/{branchId}/orders": {
+      "get": {
+        "tags": [
+          "Reports"
+        ],
+        "summary": "Synced orders of a branch, by number (status = open|submitted, limit 1..500).",
+        "operationId": "ListBranchOrders",
+        "parameters": [
+          {
+            "name": "branchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReportOrder"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ReportKey": [ ]
+          }
+        ]
+      }
+    },
+    "/v1/reports/branches/{branchId}/catalog": {
+      "get": {
+        "tags": [
+          "Reports"
+        ],
+        "summary": "Catalog last published by a branch gateway.",
+        "operationId": "GetBranchCatalog",
+        "parameters": [
+          {
+            "name": "branchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportCatalog"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ReportKey": [ ]
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BranchReport": {
+        "required": [
+          "id",
+          "name",
+          "businessId",
+          "orderCount",
+          "submittedCount",
+          "submittedTotalMinor",
+          "lastSequence",
+          "lastSyncAt"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "businessId": {
+            "type": "string"
+          },
+          "orderCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "submittedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "submittedTotalMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastSequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastSyncAt": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "BusinessReport": {
+        "required": [
+          "id",
+          "name",
+          "organizationId",
+          "branches"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string"
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BranchReport"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CloudError": {
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OrganizationReport": {
+        "required": [
+          "id",
+          "name",
+          "businesses"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "businesses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BusinessReport"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegisterGatewayRequest": {
+        "required": [
+          "code",
+          "branchId",
+          "publicKey",
+          "signature"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "branchId": {
+            "type": "string"
+          },
+          "publicKey": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegisterGatewayResponse": {
+        "required": [
+          "gatewayId",
+          "organizationId",
+          "organizationName",
+          "businessId",
+          "businessName",
+          "branchId",
+          "branchName"
+        ],
+        "type": "object",
+        "properties": {
+          "gatewayId": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string"
+          },
+          "organizationName": {
+            "type": "string"
+          },
+          "businessId": {
+            "type": "string"
+          },
+          "businessName": {
+            "type": "string"
+          },
+          "branchId": {
+            "type": "string"
+          },
+          "branchName": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReportCatalog": {
+        "required": [
+          "branchId",
+          "lastSequence",
+          "products"
+        ],
+        "type": "object",
+        "properties": {
+          "branchId": {
+            "type": "string"
+          },
+          "lastSequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncProduct"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReportOrder": {
+        "required": [
+          "branchId",
+          "lastSequence",
+          "order"
+        ],
+        "type": "object",
+        "properties": {
+          "branchId": {
+            "type": "string"
+          },
+          "lastSequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "order": {
+            "$ref": "#/components/schemas/SyncOrder"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncBatch": {
+        "required": [
+          "events"
+        ],
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncEvent"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncBatchResult": {
+        "required": [
+          "lastAcceptedSequence",
+          "outcomes",
+          "rejected"
+        ],
+        "type": "object",
+        "properties": {
+          "lastAcceptedSequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncEventOutcome"
+            }
+          },
+          "rejected": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SyncRejection"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncCloudState": {
+        "required": [
+          "lastSequence"
+        ],
+        "type": "object",
+        "properties": {
+          "lastSequence": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncEvent": {
+        "required": [
+          "sequence",
+          "eventId",
+          "type",
+          "schemaVersion",
+          "occurredAt",
+          "terminalId",
+          "order",
+          "printStations",
+          "catalog"
+        ],
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "occurredAt": {
+            "type": "string"
+          },
+          "terminalId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "order": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SyncOrder"
+              }
+            ]
+          },
+          "printStations": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "catalog": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SyncProduct"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncEventOutcome": {
+        "required": [
+          "sequence",
+          "eventId",
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncEventPage": {
+        "required": [
+          "lastSequence",
+          "events"
+        ],
+        "type": "object",
+        "properties": {
+          "lastSequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncEvent"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncOrder": {
+        "required": [
+          "id",
+          "number",
+          "label",
+          "status",
+          "version",
+          "currency",
+          "lines",
+          "itemCount",
+          "totalMinor",
+          "createdByName",
+          "updatedByName",
+          "submittedByName",
+          "createdAt",
+          "updatedAt",
+          "submittedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "label": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncOrderLine"
+            }
+          },
+          "itemCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "createdByName": {
+            "type": "string"
+          },
+          "updatedByName": {
+            "type": "string"
+          },
+          "submittedByName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "submittedAt": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncOrderLine": {
+        "required": [
+          "productId",
+          "name",
+          "unitPriceMinor",
+          "quantity",
+          "lineTotalMinor",
+          "stationId"
+        ],
+        "type": "object",
+        "properties": {
+          "productId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "unitPriceMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "lineTotalMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "stationId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncProduct": {
+        "required": [
+          "id",
+          "name",
+          "category",
+          "priceMinor",
+          "currency",
+          "stationId",
+          "isActive"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "priceMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "stationId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SyncRejection": {
+        "required": [
+          "sequence",
+          "code",
+          "message",
+          "expectedSequence"
+        ],
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "expectedSequence": {
+            "type": [
+              "null",
+              "integer"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "PosGateway": {
+        "type": "apiKey",
+        "description": "`PosGateway {gatewayId}:{unixSeconds}:{signature}`: ECDSA P-256 signature by the registered gateway key over method, path and query, timestamp and body SHA-256; valid ±5 minutes.",
+        "name": "Authorization",
+        "in": "header"
+      },
+      "ReportKey": {
+        "type": "http",
+        "description": "Read-only report key scoped to an organization, a business or a branch.",
+        "scheme": "bearer",
+        "bearerFormat": "posrk"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Gateways"
+    },
+    {
+      "name": "Sync"
+    },
+    {
+      "name": "Reports"
+    }
+  ]
+}

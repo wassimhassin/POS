@@ -57,6 +57,10 @@ From the repository root, in PowerShell:
 | Build and run | `.\scripts\run.ps1` (or `-NoBuild` to skip the build) |
 | Run with Vite hot reload (Debug only) | `npm run dev --prefix apps/pos-web`, then `.\scripts\run.ps1 -UiUrl http://localhost:5173` |
 | All tests | `.\scripts\test.ps1` (add `-SkipE2E` for unit tests only) |
+| Cloud settings check | `Pos.Cloud check-config --listen https://<ip>:<port> --certificate <pfx>` (no listener) |
+| OpenAPI snapshot | `Pos.Cloud openapi --out docs/api/cloud-v1.openapi.json` |
+
+CI (GitHub Actions) and the full list of local test commands: [docs/11-CI-AND-API-FOUNDATIONS.md](docs/11-CI-AND-API-FOUNDATIONS.md).
 
 If script execution is blocked, prefix with `powershell -ExecutionPolicy Bypass -File`.
 
@@ -287,3 +291,15 @@ The plan for incremental production work: current-state audit, Organization → 
 module and frontend boundaries, API and migration conventions, environments, pre-production security and
 reliability requirements, and a prioritized roadmap. See [docs/10-PRODUCTION-FOUNDATION.md](docs/10-PRODUCTION-FOUNDATION.md);
 decisions are logged in [docs/DECISIONS.md](docs/DECISIONS.md). Planning only; nothing has been implemented yet.
+
+## CI and API foundations (Phase 2.1A)
+
+- **CI:** GitHub Actions runs the UI checks, the .NET tests (Debug and Release) and the E2E tests. The reliability
+  scenarios run only on manual request.
+- **Errors:** every cloud failure returns the same `{code, message}` envelope.
+- **Versioning:** all routes are mapped through one `/v1` group.
+- **OpenAPI:** a 3.1 document of the public contract, [docs/api/cloud-v1.openapi.json](docs/api/cloud-v1.openapi.json).
+  A test fails if it drifts from the code, and it is served only with `run --openapi`.
+- **Configuration:** settings are validated at startup; `check-config` validates without starting.
+
+See [docs/11-CI-AND-API-FOUNDATIONS.md](docs/11-CI-AND-API-FOUNDATIONS.md).

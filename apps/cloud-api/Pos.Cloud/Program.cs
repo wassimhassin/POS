@@ -21,7 +21,9 @@ using Pos.Sync;
 //   Pos.Cloud gateway-revoke  --gateway <guid>
 //   Pos.Cloud report-key      --org <guid> [--business <guid> [--branch <guid>]] --name <name>
 //   Pos.Cloud dev-cert        --out <file.pfx> [--host <name-or-ip>]...  (POS_CLOUD_CERT_PASSWORD)
-//   Pos.Cloud run             --listen https://<ip>:<port> --certificate <file.pfx>
+//   Pos.Cloud run             --listen https://<ip>:<port> --certificate <file.pfx> [--openapi]  (--openapi serves /openapi/v1.json)
+//   Pos.Cloud check-config    --listen https://<ip>:<port> --certificate <file.pfx>   validates settings + database, no listener
+//   Pos.Cloud openapi         --out <file.json>                                       writes the OpenAPI document (no database)
 //
 // Runtime and admin commands use POS_CLOUD_DB (a role with data privileges only, no DDL).
 // No secret is hard-coded: connection strings and the certificate password come from the environment.
@@ -174,6 +176,12 @@ try
         case "run":
             return await RunAsync(options, loggerFactory, log);
 
+        case "check-config":
+            return await CheckConfigAsync(options, log);
+
+        case "openapi":
+            return await WriteOpenApiAsync(options, loggerFactory);
+
         default:
             Console.Error.WriteLine($"Commande inconnue : {command}");
             return 2;
@@ -193,54 +201,13 @@ catch (Exception ex)
 
 static async Task<int> RunAsync(Cli options, ILoggerFactory loggerFactory, ILogger log)
 {
-    var listen = Cli.ParseListen(options.Required("listen"));
-    using var certificate = X509CertificateLoader.LoadPkcs12FromFile(options.Required("certificate"), Cli.CertificatePassword());
-    var connectionString = Cli.ConnectionString("POS_CLOUD_DB");
-
-    var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
-    builder.Configuration.Sources.Clear(); // explicit configuration only: nothing can add a plain-HTTP listener
-    builder.Logging.ClearProviders();
-    builder.Services.AddSingleton(loggerFactory);
-    builder.WebHost.ConfigureKestrel(k =>
+    using var settings = ValidatedSettings(options, log);
+    if (settings is null)
     {
-        k.AddServerHeader = false;
-        k.Limits.MaxRequestBodySize = SyncProtocol.MaxBodyBytes;
-        k.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
-        k.Listen(listen, o => o.UseHttps(certificate));
-    });
+        return 2;
+    }
 
-    builder.Services.ConfigureHttpJsonOptions(o =>
-    {
-        var strict = SyncProtocol.Json;
-        o.SerializerOptions.UnmappedMemberHandling = strict.UnmappedMemberHandling;
-        o.SerializerOptions.RespectNullableAnnotations = strict.RespectNullableAnnotations;
-        o.SerializerOptions.RespectRequiredConstructorParameters = strict.RespectRequiredConstructorParameters;
-        o.SerializerOptions.NumberHandling = strict.NumberHandling;
-        o.SerializerOptions.MaxDepth = strict.MaxDepth;
-    });
-    builder.Services.Configure<RouteHandlerOptions>(o => o.ThrowOnBadRequest = true);
-
-    builder.Services.AddSingleton(TimeProvider.System);
-    builder.Services.AddDbContext<CloudDb>(o => o.UseNpgsql(connectionString));
-    builder.Services.AddScoped<SyncService>();
-    builder.Services.AddScoped<GatewayRegistration>();
-
-    builder.Services.AddAuthentication()
-        .AddScheme<AuthenticationSchemeOptions, GatewaySignatureHandler>(SyncProtocol.GatewayScheme, null)
-        .AddScheme<AuthenticationSchemeOptions, ReportKeyHandler>(SyncProtocol.ReportScheme, null);
-    builder.Services.AddAuthorizationBuilder()
-        .AddPolicy(CloudApi.GatewayPolicy, p => p.AddAuthenticationSchemes(SyncProtocol.GatewayScheme).RequireAuthenticatedUser())
-        .AddPolicy(CloudApi.ReportPolicy, p => p.AddAuthenticationSchemes(SyncProtocol.ReportScheme).RequireAuthenticatedUser())
-        // Deny by default: an endpoint without an explicit policy or AllowAnonymous requires authentication.
-        .SetFallbackPolicy(new AuthorizationPolicyBuilder(SyncProtocol.GatewayScheme, SyncProtocol.ReportScheme).RequireAuthenticatedUser().Build());
-    builder.Services.AddRateLimiter(o =>
-    {
-        o.RejectionStatusCode = 429;
-        o.AddPolicy(CloudApi.RegisterRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
-            http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) }));
-    });
-
-    var app = builder.Build();
+    var app = CloudHost.Build(settings.ConnectionString, loggerFactory, kestrel => kestrel.Listen(settings.Listen, o => o.UseHttps(settings.Certificate)));
 
     // Refuse to serve on an outdated schema (migrations are applied separately, by the schema owner).
     await using (var scope = app.Services.CreateAsyncScope())
@@ -256,16 +223,96 @@ static async Task<int> RunAsync(Cli options, ILoggerFactory loggerFactory, ILogg
     CloudFaults.Configure(Environment.GetEnvironmentVariable("POS_CLOUD_FAULT"), log);
 #endif
 
-    app.Use(CloudApi.HandleErrors);
-    app.UseRateLimiter();
-    app.UseAuthentication();
-    app.UseAuthorization();
-    CloudApi.Map(app);
-
-    app.Lifetime.ApplicationStarted.Register(() => log.LogInformation("Cloud API listening on https://{ListenEndpoint}", listen));
+    CloudHost.UsePipeline(app, exposeOpenApi: settings.OpenApi);
+    app.Lifetime.ApplicationStarted.Register(() => log.LogInformation("Cloud API listening on https://{ListenEndpoint}", settings.Listen));
     await app.RunAsync();
     return 0;
 }
+
+/// <summary>All settings checked at once; problems are printed by setting name, never with their values.</summary>
+static CloudRunSettings? ValidatedSettings(Cli options, ILogger log)
+{
+    var report = CloudSettings.LoadRun(options, Environment.GetEnvironmentVariable, DateTimeOffset.UtcNow);
+    foreach (var warning in report.Warnings)
+    {
+        log.LogWarning("Configuration: {Warning}", warning);
+    }
+
+    if (report.Settings is null)
+    {
+        Console.Error.WriteLine("Configuration invalide :");
+        foreach (var error in report.Errors)
+        {
+            Console.Error.WriteLine($"  - {error}");
+        }
+    }
+
+    return report.Settings;
+}
+
+/// <summary>
+/// Deploy-time check, without listening: the same validation as <c>run</c>, then the database as the runtime role
+/// (reachable, schema up to date, no DDL privilege, not a superuser). Exit 0 = ready to run.
+/// </summary>
+static async Task<int> CheckConfigAsync(Cli options, ILogger log)
+{
+    using var settings = ValidatedSettings(options, log);
+    if (settings is null)
+    {
+        return 2;
+    }
+
+    var errors = new List<string>();
+    await using var db = new CloudDb(new DbContextOptionsBuilder<CloudDb>().UseNpgsql(settings.ConnectionString).Options);
+    try
+    {
+        var pending = (await db.Database.GetPendingMigrationsAsync()).ToList();
+        if (pending.Count > 0)
+        {
+            errors.Add($"Base de données : schéma non à jour ({pending.Count} migration(s) en attente) ; exécutez « Pos.Cloud migrate ».");
+        }
+
+        var privileges = await db.Database.SqlQueryRaw<RolePrivileges>(
+            "SELECT r.rolsuper AS \"Superuser\", has_schema_privilege(current_user, 'public', 'CREATE') AS \"CanCreate\" FROM pg_roles r WHERE r.rolname = current_user")
+            .SingleAsync();
+        if (privileges.Superuser || privileges.CanCreate)
+        {
+            errors.Add($"{CloudSettings.RuntimeDb} : le rôle applicatif ne doit avoir que des droits sur les données (ni superutilisateur, ni CREATE sur le schéma).");
+        }
+    }
+    catch (Exception ex) when (ex is Npgsql.NpgsqlException or InvalidOperationException or TimeoutException)
+    {
+        // The provider's message can name the host and user; the cause class is enough to act on.
+        errors.Add($"{CloudSettings.RuntimeDb} : connexion impossible ({ex.GetType().Name}).");
+    }
+
+    if (errors.Count > 0)
+    {
+        Console.Error.WriteLine("Configuration invalide :");
+        errors.ForEach(e => Console.Error.WriteLine($"  - {e}"));
+        return 2;
+    }
+
+    Console.WriteLine("config=ok");
+    return 0;
+}
+
+/// <summary>Writes the OpenAPI document of the public contract (no database, no listener).</summary>
+static async Task<int> WriteOpenApiAsync(Cli options, ILoggerFactory loggerFactory)
+{
+    var path = Path.GetFullPath(options.Required("out"));
+    // A syntactically valid placeholder: the document is generated from endpoint metadata, the database is never opened.
+    await using var app = CloudHost.Build("Host=openapi.invalid;Database=none;Username=none", loggerFactory, kestrel: null);
+    CloudHost.UsePipeline(app, exposeOpenApi: false);
+    await app.StartAsync(); // no-op server: nothing listens
+    var json = await CloudHost.OpenApiJsonAsync(app);
+    await app.StopAsync();
+    await File.WriteAllTextAsync(path, json);
+    Console.WriteLine($"openapi={path}");
+    return 0;
+}
+
+internal sealed record RolePrivileges(bool Superuser, bool CanCreate);
 
 internal static class DevCertificate
 {

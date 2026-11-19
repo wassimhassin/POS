@@ -322,7 +322,8 @@ API conventions in code, OpenAPI, RLS and CI. Suggested first slice inside 2.1:
 3. Management API for organization/business/branch with audit.
 4. Cross-tenant tests extended to the new endpoints.
 
-Phase 2.1 has **not** been started.
+Phase 2.1A (CI, error envelope, `/v1` group, OpenAPI, configuration validation) is done: see
+[11-CI-AND-API-FOUNDATIONS.md](11-CI-AND-API-FOUNDATIONS.md). Identity, RBAC, RLS and the management API remain.
 
 ---
 

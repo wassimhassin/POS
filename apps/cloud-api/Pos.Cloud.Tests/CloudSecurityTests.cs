@@ -81,7 +81,9 @@ public sealed class CloudSecurityTests : IAsyncLifetime
 
         var gatewayId = _cloud.Admin("gateways", "--branch", branch.BranchId.ToString("D")).Split(' ')[0];
         _cloud.Admin("gateway-revoke", "--gateway", gatewayId);
-        await BranchUnderTest.PlaceAsync(a);
+        // One write only: its event is refused at once and fences the gateway, so a second write could already be
+        // refused (recovery_in_progress) depending on timing. One unsent event is enough to prove it is kept.
+        await a.Client.CreateOrderAsync(Wait.NewId(), null);
 
         await Wait.UntilAsync(() => branch.LastSyncError?.Contains("refuse les identifiants", StringComparison.Ordinal) == true, "gateway reports the refusal");
         Assert.Equal(synced, branch.AckedSequence);

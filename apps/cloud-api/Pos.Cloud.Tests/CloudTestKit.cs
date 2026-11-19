@@ -54,7 +54,13 @@ public sealed class PostgresCluster
             return configured;
         }
 
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PostgreSQL");
+        // GitHub's Windows runners preinstall PostgreSQL (service stopped) and expose its bin folder as PGBIN.
+        if (Environment.GetEnvironmentVariable("PGBIN") is { Length: > 0 } runnerBin && File.Exists(Path.Combine(runnerBin, "pg_ctl.exe")))
+        {
+            return runnerBin;
+        }
+
+        var root =Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PostgreSQL");
         var bin = Directory.Exists(root)
             ? Directory.GetDirectories(root).Select(d => Path.Combine(d, "bin")).Where(d => File.Exists(Path.Combine(d, "pg_ctl.exe")))
                 .OrderByDescending(d => int.TryParse(new DirectoryInfo(d).Parent!.Name, out var v) ? v : 0).FirstOrDefault()
@@ -217,7 +223,7 @@ public sealed partial class CloudProcess : IAsyncDisposable
 
     public async Task StartAsync()
     {
-        var info = Info("run", "--listen", $"https://127.0.0.1:{Port}", "--certificate", CertificatePath);
+        var info = Info([.. RunArgs(), .. RunArguments]);
         foreach (var (name, value) in _environment)
         {
             info.Environment[name] = value;
@@ -273,9 +279,32 @@ public sealed partial class CloudProcess : IAsyncDisposable
         return exitCode == 0 ? output : throw new InvalidOperationException($"Pos.Cloud {args[0]} failed ({exitCode}): {output}");
     }
 
-    public (int ExitCode, string Output) AdminRaw(params string[] args)
+    /// <summary>Extra arguments for <c>run</c> (e.g. <c>--openapi</c>).</summary>
+    public List<string> RunArguments { get; } = [];
+
+    /// <summary>The <c>run</c> listener arguments, reused by <c>check-config</c>.</summary>
+    public string[] RunArgs() => ["run", "--listen", $"https://127.0.0.1:{Port}", "--certificate", CertificatePath];
+
+    public (int ExitCode, string Output) AdminRaw(params string[] args) => AdminRaw(new Dictionary<string, string?>(), args);
+
+    /// <summary>Runs a CLI command with environment overrides (<c>null</c> removes a variable).</summary>
+    public (int ExitCode, string Output) AdminRaw(IReadOnlyDictionary<string, string?> environment, params string[] args)
     {
-        using var process = Process.Start(Info(args))!;
+        ArgumentNullException.ThrowIfNull(environment);
+        var info = Info(args);
+        foreach (var (name, value) in environment)
+        {
+            if (value is null)
+            {
+                info.Environment.Remove(name);
+            }
+            else
+            {
+                info.Environment[name] = value;
+            }
+        }
+
+        using var process = Process.Start(info)!;
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         process.WaitForExit(60_000);

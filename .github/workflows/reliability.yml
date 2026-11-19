@@ -1,0 +1,44 @@
+# Opt-in reliability/load scenarios (doc 09). Manual only: never runs on push or pull request.
+name: Reliability (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  reliability:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Locate PostgreSQL
+        shell: pwsh
+        run: |
+          if (-not $env:PGBIN -or -not (Test-Path (Join-Path $env:PGBIN 'pg_ctl.exe'))) { throw "PostgreSQL binaries not found (PGBIN)." }
+          "POS_PG_BIN=$env:PGBIN" >> $env:GITHUB_ENV
+      - run: dotnet build PosSaaS.slnx -c Release
+      - name: Reliability scenarios (L1-L5, R1-R4)
+        env:
+          POS_RELIABILITY: "1"
+          POS_RELIABILITY_OUT: ${{ github.workspace }}/TestResults/reliability.jsonl
+        run: dotnet test apps/cloud-api/Pos.Cloud.Tests -c Release --no-build --filter "FullyQualifiedName~ReliabilityTests" --logger trx --results-directory TestResults
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reliability-results
+          path: TestResults
+          retention-days: 14
