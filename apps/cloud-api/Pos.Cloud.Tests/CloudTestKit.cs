@@ -112,6 +112,17 @@ public sealed class PostgresCluster
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Restarts THIS test cluster (its own data directory under %TEMP%, its own port), never an installed
+    /// PostgreSQL service. "immediate" = crash-like stop (no checkpoint, WAL recovery at start).
+    /// </summary>
+    public void Restart(string mode = "immediate")
+    {
+        var data = Path.Combine(_root, "data");
+        Tool(_bin, "pg_ctl.exe", "-D", data, "-m", mode, "-w", "stop");
+        Tool(_bin, "pg_ctl.exe", "-D", data, "-o", $"-p {Port} -c listen_addresses=127.0.0.1 -c max_connections=300", "-l", Path.Combine(_root, "postgres.log"), "-w", "start");
+    }
+
     private void Stop()
     {
         try
@@ -252,6 +263,9 @@ public sealed partial class CloudProcess : IAsyncDisposable
     }
 
     public bool HasExited => _process is { HasExited: true };
+
+    /// <summary>The running cloud process (memory sampling in the reliability tests).</summary>
+    public Process? CurrentProcess => _process;
 
     public string Admin(params string[] args)
     {

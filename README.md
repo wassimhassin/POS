@@ -267,3 +267,16 @@ Procedures and limitations: [docs/08-BACKUP-RESTORE-RECOVERY.md](docs/08-BACKUP-
   contradictions.
 - One active gateway per branch in the cloud (`gateway-code --replace`). A replaced gateway is fenced.
   Tills are replaced with `replace-terminal` or unpaired from the POS (new identity at re-pairing).
+
+## Reliability validation (Phase 1.6A)
+
+Load and fault scenarios against the real gateway, cloud and a private PostgreSQL cluster: concurrent
+terminals, large backlogs, duplicate and interrupted requests, gateway, cloud and PostgreSQL restarts,
+network cuts and late acknowledgments, backups under load. Results, criteria, risks and the hardware checklist
+are in [docs/09-RELIABILITY-VALIDATION.md](docs/09-RELIABILITY-VALIDATION.md). These are single-PC measurements; no physical
+hardware was validated.
+
+```powershell
+$env:POS_RELIABILITY = "1"   # opt-in; run one scenario at a time
+dotnet test apps/cloud-api/Pos.Cloud.Tests -c Release --filter "FullyQualifiedName~ReliabilityTests.L1"
+```

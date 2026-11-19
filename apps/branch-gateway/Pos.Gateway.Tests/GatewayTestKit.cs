@@ -38,6 +38,9 @@ public sealed partial class GatewayProcess : IAsyncDisposable
 
     public bool IsRunning => _process is { HasExited: false };
 
+    /// <summary>The running gateway process (memory sampling in the reliability tests).</summary>
+    public Process? CurrentProcess => _process;
+
     /// <summary>Extra arguments for « run » (e.g. sync tuning in cloud tests).</summary>
     public List<string> RunArguments { get; } = [];
 
