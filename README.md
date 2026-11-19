@@ -280,3 +280,10 @@ hardware was validated.
 $env:POS_RELIABILITY = "1"   # opt-in; run one scenario at a time
 dotnet test apps/cloud-api/Pos.Cloud.Tests -c Release --filter "FullyQualifiedName~ReliabilityTests.L1"
 ```
+
+## Production foundation (Phase 2.0)
+
+The plan for incremental production work: current-state audit, Organization → Business → Branch tenancy,
+module and frontend boundaries, API and migration conventions, environments, pre-production security and
+reliability requirements, and a prioritized roadmap. See [docs/10-PRODUCTION-FOUNDATION.md](docs/10-PRODUCTION-FOUNDATION.md);
+decisions are logged in [docs/DECISIONS.md](docs/DECISIONS.md). Planning only; nothing has been implemented yet.

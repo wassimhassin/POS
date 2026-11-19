@@ -1,0 +1,19 @@
+# Architecture decision log
+
+Short records: context → decision → consequences. A change to a decision needs a new entry that supersedes it.
+Details and rationale: [10-PRODUCTION-FOUNDATION.md](10-PRODUCTION-FOUNDATION.md).
+
+| ID | Date | Decision | Status |
+|---|---|---|---|
+| ADR-001 | 2026-11-19 | **Organization → Business → Branch.** The organization is the tenant and billing party (`tenant_id` in docs 01–03 ≡ `organization_id`). The business owns legal/fiscal identity, catalog and taxes. The branch is a site with exactly one active gateway. | Accepted |
+| ADR-002 | 2026-11-19 | **Cloud = one modular monolith (`Pos.Cloud`)** with modules as folders/namespaces, per-module endpoints and entity configuration, and no cross-module table access. A module moves to its own project only when justified. No microservices, broker or Redis without measured need. | Accepted |
+| ADR-003 | 2026-11-19 | **Isolation:** the scope comes from the authenticated principal; composite tenant keys on every owned row; out of scope → 404; mandatory cross-tenant tests; **PostgreSQL RLS** on the app role as defence in depth (from 2.1). Platform admin uses a separate role/scheme, audited. | Accepted |
+| ADR-004 | 2026-11-19 | **Two authorities, one writer each.** The cloud is authoritative for *configuration* (catalog, prices, staff, permissions, entitlements) and delivers it as versioned branch snapshots pulled by the gateway over its existing signed credential. The gateway is authoritative for *branch operations* (orders, tables, payments, cash, stock movements) and sends them through the existing outbox. The gateway stops being catalog authority; the cloud never edits active branch state. | Accepted |
+| ADR-005 | 2026-11-19 | **Reuse the gateway command engine** (operation id, expected version, replay/resolve, serialized writer, SignalR notify + snapshot) for every new branch command. Reuse the outbox sync for every new event type. | Accepted |
+| ADR-006 | 2026-11-19 | **Identity:** ASP.NET Core Identity in the cloud for owners/managers (cookie + MFA). POS/waiter staff sign in with a PIN verified by the gateway against hashed credentials in the snapshot; device trust (existing keys) stays separate from staff identity. | Accepted |
+| ADR-007 | 2026-11-19 | **API conventions** (doc 10 §5): `/v1`, error envelope `{code, message, current?}`, operation ids, optimistic versions, cursor paging, minor-unit money, UTC + branch timezone, OpenAPI from the first-party package for the cloud. | Accepted |
+| ADR-008 | 2026-11-19 | **Frontends:** one Vite app per surface (dashboard, POS, waiter, KDS, QR, admin) with npm workspaces and shared `packages/ui` (semantic tokens, open for Claude Design) and `packages/contracts`. No component library before design approval. | Accepted |
+| ADR-009 | — | **LAN TLS trust for browser clients** (waiter, KDS). | **Open**, needed before 2.7/2.8 |
+| ADR-010 | 2026-11-19 | **Migrations:** EF expand → migrate → contract, run as an explicit deploy step with the owner role; SQLite forward-only with a verified gateway backup before migrating; upgrade order cloud → gateway → terminals; the cloud accepts sync schema N and N-1. | Accepted |
+| ADR-011 | 2026-11-19 | **Configuration:** code defaults + environment variables only, secrets from the hosting secret store; fault injection compiled out of Release; separate keys/certificates per environment. | Accepted |
+| ADR-012 | — | **Cloud hosting region, data residency, RPO/RTO.** | **Open**, needs legal input |
