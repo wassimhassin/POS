@@ -88,7 +88,9 @@ public sealed class CloudSyncTests : IAsyncLifetime
     [Fact]
     public async Task Cloud_killed_while_draining_a_large_backlog_then_restarted_ends_with_each_event_once()
     {
-        await using var branch = await BranchUnderTest.CreateAsync(_cloud, _organization, _business, "Centre", link: false, batchSize: 1);
+        // Generous request timeout: provisioning codes are single use, so a registration whose reply arrives after the
+        // gateway gave up cannot be retried with the same code (known limitation, doc 12 §5) and the drain never starts.
+        await using var branch = await BranchUnderTest.CreateAsync(_cloud, _organization, _business, "Centre", link: false, batchSize: 1, syncTimeoutSeconds: 30);
         var a = await branch.TerminalAsync("Caisse A");
         var orders = new List<SharedOrder>();
         for (var i = 0; i < 25; i++)
@@ -103,7 +105,16 @@ public sealed class CloudSyncTests : IAsyncLifetime
         branch.Gateway.Run("cloud-link", "--url", relay.Url, "--code", _cloud.GatewayCode(branch.BranchId), "--pin", _cloud.Fingerprint);
         // Kill at the first committed event: the remaining ~66 single-event batches still need ≥ 10 s, a wide margin
         // over polling and kill latency. Reaching that point is slow under load (every relayed reply is held), hence 90 s.
-        await Wait.UntilAsync(() => _cloud.Count("SELECT last_sequence FROM branch_sync_states WHERE branch_id = @p0", branch.BranchId) >= 1, "sync under way", 90);
+        try
+        {
+            await Wait.UntilAsync(() => _cloud.Count("SELECT last_sequence FROM branch_sync_states WHERE branch_id = @p0", branch.BranchId) >= 1, "sync under way", 90);
+        }
+        catch (TimeoutException)
+        {
+            throw new TimeoutException("No event committed within 90 s.\n--- gateway ---\n" + string.Join('\n', branch.Gateway.Log.TakeLast(40))
+                + "\n--- cloud ---\n" + string.Join('\n', _cloud.Log.TakeLast(40)));
+        }
+
         await _cloud.KillAsync();
 
         // Whatever was in flight: the cloud's checkpoint equals its stored events (no partial batch), and the

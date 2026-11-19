@@ -2,12 +2,15 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Npgsql;
+using Pos.Cloud.Identity;
 
 namespace Pos.Cloud;
 
 /// <summary>Validated settings for <c>Pos.Cloud run</c>. Owns the loaded certificate.</summary>
-internal sealed class CloudRunSettings(IPEndPoint listen, X509Certificate2 certificate, string connectionString, bool openApi) : IDisposable
+internal sealed class CloudRunSettings(IPEndPoint listen, X509Certificate2 certificate, string connectionString, AuthSettings auth, bool openApi) : IDisposable
 {
+    public AuthSettings Auth { get; } = auth;
+
     public IPEndPoint Listen { get; } = listen;
 
     public X509Certificate2 Certificate { get; } = certificate;
@@ -29,6 +32,8 @@ internal static class CloudSettings
     public const string RuntimeDb = "POS_CLOUD_DB";
     public const string MigrationDb = "POS_CLOUD_MIGRATION_DB";
     public const string CertificatePassword = "POS_CLOUD_CERT_PASSWORD";
+    public const string PublicOrigin = "POS_CLOUD_PUBLIC_ORIGIN";
+    public const string MailDirectory = "POS_CLOUD_MAIL_DIR";
     public const int MinCertificatePasswordLength = 12;
     private static readonly TimeSpan s_certificateExpiryWarning = TimeSpan.FromDays(30);
 
@@ -60,14 +65,67 @@ internal static class CloudSettings
 
         var connectionString = ValidateConnectionString(environment(RuntimeDb), environment(MigrationDb), errors, warnings);
         var certificate = LoadCertificate(options.One("certificate"), environment(CertificatePassword), now, errors, warnings);
+        var auth = LoadAuth(environment, errors);
 
-        if (errors.Count > 0 || listen is null || connectionString is null || certificate is null)
+        if (errors.Count > 0 || listen is null || connectionString is null || certificate is null || auth is null)
         {
             certificate?.Dispose();
             return new Report(null, errors, warnings);
         }
 
-        return new Report(new CloudRunSettings(listen, certificate, connectionString, options.Has("openapi")), errors, warnings);
+        return new Report(new CloudRunSettings(listen, certificate, connectionString, auth, options.Has("openapi")), errors, warnings);
+    }
+
+    /// <summary>
+    /// User authentication: the public origin of the dashboard (links in emails, CSRF origin check) and the mail
+    /// pickup directory. Both are required: a misconfigured host must not run with half-working account recovery.
+    /// </summary>
+    public static AuthSettings? LoadAuth(Func<string, string?> environment, List<string> errors)
+    {
+        ArgumentNullException.ThrowIfNull(environment);
+        ArgumentNullException.ThrowIfNull(errors);
+        string? origin = null;
+        var originValue = environment(PublicOrigin);
+        if (string.IsNullOrWhiteSpace(originValue))
+        {
+            errors.Add($"{PublicOrigin} : variable d'environnement requise (origine HTTPS du tableau de bord, ex. https://app.exemple.tn).");
+        }
+        else if (!Uri.TryCreate(originValue, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps
+            || uri.PathAndQuery != "/" || !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Fragment) || originValue.EndsWith('/'))
+        {
+            errors.Add($"{PublicOrigin} : doit être une origine https://hôte[:port], sans chemin ni barre finale.");
+        }
+        else
+        {
+            origin = uri.GetLeftPart(UriPartial.Authority);
+        }
+
+        string? mail = null;
+        var mailValue = environment(MailDirectory);
+        if (string.IsNullOrWhiteSpace(mailValue))
+        {
+            errors.Add($"{MailDirectory} : variable d'environnement requise (dossier de dépôt des e-mails de sécurité).");
+        }
+        else if (!Path.IsPathFullyQualified(mailValue) || !Directory.Exists(mailValue))
+        {
+            errors.Add($"{MailDirectory} : dossier absolu existant requis.");
+        }
+        else
+        {
+            var probe = Path.Combine(mailValue, $".write-test-{Guid.NewGuid():N}");
+            try
+            {
+                File.WriteAllBytes(probe, []);
+                File.Delete(probe);
+                mail = mailValue;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                errors.Add($"{MailDirectory} : dossier non accessible en écriture.");
+            }
+        }
+
+        return origin is null || mail is null ? null : new AuthSettings(origin, mail);
     }
 
     private static string? ValidateConnectionString(string? runtime, string? migration, List<string> errors, List<string> warnings)

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using Pos.Cloud.Identity;
 using Pos.Sync;
 
 namespace Pos.Cloud;
@@ -85,6 +86,9 @@ public static class CloudApi
             .WithSummary("Confirmed events of the authenticated gateway's branch after a sequence (recovery).")
             .Produces<SyncEventPage>()
             .Produces<CloudError>(StatusCodes.Status403Forbidden);
+
+        // Cloud users (sessions); separate from the gateway and report-key schemes.
+        AuthApi.Map(v1);
 
         var reports = v1.MapGroup("/reports").RequireAuthorization(ReportPolicy).WithTags("Reports").ProducesErrors(404);
 
@@ -253,6 +257,9 @@ public static class CloudApi
             ? WriteError(http, 403, CloudErrorCodes.GatewayRevoked, "Cette passerelle a été révoquée (remplacée ?) : elle ne doit plus servir la succursale.")
             : WriteError(http, 401, "unauthorized", "Authentification requise ou refusée.");
     }
+
+    /// <summary>Writes the CloudError envelope (used by other modules' handlers).</summary>
+    public static Task WriteErrorAsync(HttpContext http, int status, string code, string message) => WriteError(http, status, code, message);
 
     private static async Task WriteError(HttpContext http, int status, string code, string message)
     {

@@ -13,7 +13,8 @@ namespace Pos.Cloud.Tests;
 public sealed class ApiFoundationTests : IAsyncLifetime
 {
     private static readonly string[] s_forbiddenInDocument =
-        ["secret", "password", "pos_app", "fault", "privatekey", "private_key", "connection", "127.0.0.1", "localhost"];
+        // Auth request fields are named "password"/"code"; stored secrets and their hashes must never appear.
+        ["passwordhash", "password_hash", "tokenhash", "token_hash", "totpsecret", "totp_secret", "securitystamp", "security_stamp", "codehash", "secret_sha256", "secretsha256", "pos_app", "fault", "privatekey", "private_key", "connection", "127.0.0.1", "localhost"];
 
     private readonly CloudProcess _cloud = new();
     private Guid _organization;
@@ -153,13 +154,17 @@ public sealed class ApiFoundationTests : IAsyncLifetime
             var operations = document["paths"]!.AsObject()
                 .SelectMany(p => p.Value!.AsObject().Select(o => (Path: p.Key, Method: o.Key, Operation: o.Value!)))
                 .ToList();
-            Assert.Equal(9, operations.Count);
+            Assert.Equal(27, operations.Count);
             Assert.All(operations, o => Assert.StartsWith("/v1/", o.Path, StringComparison.Ordinal));
             Assert.All(operations, o => Assert.NotNull(o.Operation["responses"]!["401"]));
             foreach (var (opPath, method, operation) in operations)
             {
                 var schemes = operation["security"]?.AsArray().SelectMany(r => r!.AsObject().Select(s => s.Key)).ToList() ?? [];
-                string[] expected = opPath == "/v1/gateways/register" ? [] : opPath.StartsWith("/v1/reports/", StringComparison.Ordinal) ? ["ReportKey"] : ["PosGateway"];
+                string[] anonymous = ["/v1/gateways/register", "/v1/auth/register", "/v1/auth/verify-email", "/v1/auth/resend-verification", "/v1/auth/login", "/v1/auth/password/forgot", "/v1/auth/password/reset"];
+                string[] expected = anonymous.Contains(opPath) ? []
+                    : opPath.StartsWith("/v1/reports/", StringComparison.Ordinal) ? ["ReportKey"]
+                    : opPath.StartsWith("/v1/auth/", StringComparison.Ordinal) || opPath.StartsWith("/v1/me", StringComparison.Ordinal) ? ["Session"]
+                    : ["PosGateway"];
                 Assert.True(expected.SequenceEqual(schemes), $"{method} {opPath}: [{string.Join(',', schemes)}]");
             }
 
@@ -260,6 +265,46 @@ public sealed class ConfigValidationTests : IAsyncLifetime
         finally
         {
             PostgresCluster.Instance.Execute(_cloud.Database, "REVOKE CREATE ON SCHEMA public FROM pos_app;");
+        }
+
+        Assert.Equal(0, _cloud.AdminRaw(CheckConfig()).ExitCode);
+    }
+
+    [Fact]
+    public void User_authentication_settings_are_required_and_validated()
+    {
+        var (exitCode, output) = _cloud.AdminRaw(
+            new Dictionary<string, string?> { ["POS_CLOUD_PUBLIC_ORIGIN"] = null, ["POS_CLOUD_MAIL_DIR"] = null }, CheckConfig());
+        Assert.Equal(2, exitCode);
+        Assert.Contains("POS_CLOUD_PUBLIC_ORIGIN : variable d'environnement requise", output, StringComparison.Ordinal);
+        Assert.Contains("POS_CLOUD_MAIL_DIR : variable d'environnement requise", output, StringComparison.Ordinal);
+
+        foreach (var origin in new[] { "http://dashboard.test", "https://dashboard.test/app", "https://dashboard.test/", "dashboard.test" })
+        {
+            (exitCode, output) = _cloud.AdminRaw(new Dictionary<string, string?> { ["POS_CLOUD_PUBLIC_ORIGIN"] = origin }, CheckConfig());
+            Assert.True(exitCode == 2, origin);
+            Assert.Contains("POS_CLOUD_PUBLIC_ORIGIN : doit être une origine", output, StringComparison.Ordinal);
+        }
+
+        (exitCode, output) = _cloud.AdminRaw(
+            new Dictionary<string, string?> { ["POS_CLOUD_MAIL_DIR"] = Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}") }, CheckConfig());
+        Assert.Equal(2, exitCode);
+        Assert.Contains("POS_CLOUD_MAIL_DIR : dossier absolu existant requis", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_security_log_must_be_append_only_for_the_runtime_role()
+    {
+        PostgresCluster.Instance.Execute(_cloud.Database, "GRANT UPDATE, DELETE ON auth_audit_events TO pos_app;");
+        try
+        {
+            var (exitCode, output) = _cloud.AdminRaw(CheckConfig());
+            Assert.Equal(2, exitCode);
+            Assert.Contains("journal de sécurité", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            PostgresCluster.Instance.Execute(_cloud.Database, "REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app;");
         }
 
         Assert.Equal(0, _cloud.AdminRaw(CheckConfig()).ExitCode);

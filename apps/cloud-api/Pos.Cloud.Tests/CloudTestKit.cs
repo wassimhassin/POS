@@ -108,6 +108,7 @@ public sealed class PostgresCluster
         GRANT USAGE ON SCHEMA public TO pos_app;
         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app;
         REVOKE INSERT, UPDATE, DELETE ON "__EFMigrationsHistory" FROM pos_app;
+        REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app;
         """);
 
     public void Execute(string database, string sql)
@@ -178,6 +179,7 @@ public sealed partial class CloudProcess : IAsyncDisposable
     {
         Database = PostgresCluster.Instance.CreateDatabase();
         _dir = Directory.CreateTempSubdirectory("pos-cloud-test-").FullName;
+        Directory.CreateDirectory(MailDirectory);
         Port = PostgresCluster.FreePort();
         Admin("migrate");
         PostgresCluster.Instance.GrantApp(Database);
@@ -352,13 +354,43 @@ public sealed partial class CloudProcess : IAsyncDisposable
         return Convert.ToInt64(command.ExecuteScalar() ?? 0L, CultureInfo.InvariantCulture);
     }
 
-    public HttpClient Http(string? reportKey = null)
+    /// <summary>The public dashboard origin configured for this cloud (links in emails, CSRF origin check).</summary>
+    public const string PublicOrigin = "https://dashboard.test";
+
+    /// <summary>The mail pickup directory: security mails (verification, reset, invitation) land here as .eml files.</summary>
+    public string MailDirectory => Path.Combine(_dir, "mail");
+
+    /// <param name="source">Local loopback address to connect from (127.0.0.x): each test gets its own rate-limit partition.</param>
+    /// <param name="cookies">Cookie jar for user sessions.</param>
+    public HttpClient Http(string? reportKey = null, IPAddress? source = null, CookieContainer? cookies = null)
     {
         var pin = Convert.FromHexString(Fingerprint);
-        var http = new HttpClient(new SocketsHttpHandler
+        var handler = new SocketsHttpHandler
         {
             SslOptions = { RemoteCertificateValidationCallback = (_, cert, _, _) => cert is not null && SHA256.HashData(cert.GetRawCertData()).AsSpan().SequenceEqual(pin) },
-        })
+            UseCookies = cookies is not null,
+            CookieContainer = cookies ?? new CookieContainer(),
+        };
+        if (source is not null)
+        {
+            handler.ConnectCallback = async (context, ct) =>
+            {
+                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    socket.Bind(new IPEndPoint(source, 0));
+                    await socket.ConnectAsync(context.DnsEndPoint, ct);
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            };
+        }
+
+        var http = new HttpClient(handler)
         {
             BaseAddress = new Uri(Url),
             Timeout = TimeSpan.FromSeconds(15),
@@ -409,6 +441,8 @@ public sealed partial class CloudProcess : IAsyncDisposable
         info.Environment["POS_CLOUD_DB"] = PostgresCluster.Instance.AppConnection(Database);
         info.Environment["POS_CLOUD_MIGRATION_DB"] = PostgresCluster.Instance.AdminConnection(Database);
         info.Environment["POS_CLOUD_CERT_PASSWORD"] = _certificatePassword;
+        info.Environment["POS_CLOUD_PUBLIC_ORIGIN"] = PublicOrigin;
+        info.Environment["POS_CLOUD_MAIL_DIR"] = MailDirectory;
         return info;
     }
 }
@@ -438,10 +472,10 @@ public sealed class BranchUnderTest : IAsyncDisposable
     /// The gateway is initialized first (existing local identity), then the cloud branch is created with THAT id,
     /// then the gateway is linked with a one-time code: the existing identity is kept, not replaced.
     /// </summary>
-    public static async Task<BranchUnderTest> CreateAsync(CloudProcess cloud, Guid organizationId, Guid businessId, string name, bool link = true, int batchSize = 100)
+    public static async Task<BranchUnderTest> CreateAsync(CloudProcess cloud, Guid organizationId, Guid businessId, string name, bool link = true, int batchSize = 100, int syncTimeoutSeconds = 5)
     {
         var gateway = new GatewayProcess();
-        gateway.RunArguments.AddRange(["--sync-max-backoff", "1", "--sync-timeout", "5", "--sync-batch", batchSize.ToString(CultureInfo.InvariantCulture)]);
+        gateway.RunArguments.AddRange(["--sync-max-backoff", "1", "--sync-timeout", syncTimeoutSeconds.ToString(CultureInfo.InvariantCulture), "--sync-batch", batchSize.ToString(CultureInfo.InvariantCulture)]);
         var branchId = cloud.CreateBranch(businessId, name, gateway.BranchId);
         await gateway.StartAsync();
         var branch = new BranchUnderTest(gateway, organizationId, businessId, branchId);

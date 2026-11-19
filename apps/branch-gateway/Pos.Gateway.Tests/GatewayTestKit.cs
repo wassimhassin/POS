@@ -44,6 +44,22 @@ public sealed partial class GatewayProcess : IAsyncDisposable
     /// <summary>Extra arguments for « run » (e.g. sync tuning in cloud tests).</summary>
     public List<string> RunArguments { get; } = [];
 
+    /// <summary>Recent output lines of the running gateway (bounded), for failure diagnostics.</summary>
+    public System.Collections.Concurrent.ConcurrentQueue<string> Log { get; } = new();
+
+    private void Record(string? line)
+    {
+        if (line is null)
+        {
+            return;
+        }
+
+        Log.Enqueue(line);
+        while (Log.Count > 400 && Log.TryDequeue(out _))
+        {
+        }
+    }
+
     public static string Executable
     {
         get
@@ -89,8 +105,8 @@ public sealed partial class GatewayProcess : IAsyncDisposable
         }
 
         _process = Process.Start(info)!;
-        _process.OutputDataReceived += (_, _) => { };
-        _process.ErrorDataReceived += (_, _) => { };
+        _process.OutputDataReceived += (_, e) => Record(e.Data);
+        _process.ErrorDataReceived += (_, e) => Record(e.Data);
         _process.BeginOutputReadLine();
         _process.BeginErrorReadLine();
 

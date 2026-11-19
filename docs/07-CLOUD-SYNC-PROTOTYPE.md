@@ -189,8 +189,11 @@ re-run a report read; report keys have no expiry or rotation UI; no audit log of
 $env:POS_CLOUD_MIGRATION_DB = "Host=...;Username=owner;Password=...;Database=pos_cloud"
 $env:POS_CLOUD_DB           = "Host=...;Username=pos_app;Password=...;Database=pos_cloud"   # DML only
 $env:POS_CLOUD_CERT_PASSWORD = "<12+ chars>"
+$env:POS_CLOUD_PUBLIC_ORIGIN = "https://dashboard.example.tn"   # links in account emails (doc 12)
+$env:POS_CLOUD_MAIL_DIR      = "C:posmail"                    # existing folder: account emails land here as .eml
 $cloud = "apps\cloud-api\Pos.Cloud\bin\Debug\net10.0\Pos.Cloud.exe"
 & $cloud migrate                     # then GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES ... TO pos_app
+                                     # and REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app
 & $cloud dev-cert --out cloud.pfx --host 127.0.0.1          # prints sha256=<pin>
 & $cloud org-create --name "Groupe"                          # organization_id=...
 & $cloud business-create --org <org> --name "Café"           # business_id=...

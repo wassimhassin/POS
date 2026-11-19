@@ -6,8 +6,10 @@ using Microsoft.AspNetCore.OpenApi;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
+using Pos.Cloud.Identity;
 using Pos.Sync;
 
 namespace Pos.Cloud;
@@ -16,7 +18,7 @@ namespace Pos.Cloud;
 internal static class CloudHost
 {
     /// <param name="kestrel">Listener configuration; <c>null</c> = no network at all (a no-op server, for <c>openapi</c>).</param>
-    public static WebApplication Build(string connectionString, ILoggerFactory loggerFactory, Action<KestrelServerOptions>? kestrel)
+    public static WebApplication Build(string connectionString, AuthSettings auth, ILoggerFactory loggerFactory, Action<KestrelServerOptions>? kestrel)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
         builder.Configuration.Sources.Clear(); // explicit configuration only: nothing can add a plain-HTTP listener
@@ -46,10 +48,35 @@ internal static class CloudHost
         builder.Services.AddScoped<SyncService>();
         builder.Services.AddScoped<GatewayRegistration>();
 
+        // Cloud users: Identity (users, password hashing, lockout, security stamp) + server-side sessions.
+        builder.Services.AddSingleton(auth);
+        builder.Services.AddSingleton<IAuthMailer>(sp => new PickupDirectoryMailer(auth.MailDirectory, sp.GetRequiredService<ILogger<PickupDirectoryMailer>>()));
+        builder.Services.AddScoped<SessionService>();
+        builder.Services.AddScoped<AuthService>();
+        builder.Services.AddIdentityCore<CloudUser>(o =>
+            {
+                // Length over composition rules (NIST SP 800-63B); upper bound in AuthService (hashing cost).
+                o.Password.RequiredLength = 12;
+                o.Password.RequiredUniqueChars = 5;
+                o.Password.RequireDigit = false;
+                o.Password.RequireLowercase = false;
+                o.Password.RequireUppercase = false;
+                o.Password.RequireNonAlphanumeric = false;
+                o.User.RequireUniqueEmail = true;
+                o.SignIn.RequireConfirmedEmail = true;
+                o.Lockout.AllowedForNewUsers = true;
+                o.Lockout.MaxFailedAccessAttempts = 5;
+                o.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+            })
+            .AddEntityFrameworkStores<CloudDb>();
+
         builder.Services.AddAuthentication()
             .AddScheme<AuthenticationSchemeOptions, GatewaySignatureHandler>(SyncProtocol.GatewayScheme, null)
-            .AddScheme<AuthenticationSchemeOptions, ReportKeyHandler>(SyncProtocol.ReportScheme, null);
-        builder.Services.AddAuthorizationBuilder()
+            .AddScheme<AuthenticationSchemeOptions, ReportKeyHandler>(SyncProtocol.ReportScheme, null)
+            .AddScheme<AuthenticationSchemeOptions, SessionHandler>(SessionService.Scheme, null);
+        var authorization = builder.Services.AddAuthorizationBuilder();
+        AuthApi.AddPolicies(authorization);
+        authorization
             .AddPolicy(CloudApi.GatewayPolicy, p => p.AddAuthenticationSchemes(SyncProtocol.GatewayScheme).RequireAuthenticatedUser())
             .AddPolicy(CloudApi.ReportPolicy, p => p.AddAuthenticationSchemes(SyncProtocol.ReportScheme).RequireAuthenticatedUser())
             // Deny by default: an endpoint without an explicit policy or AllowAnonymous requires authentication.
@@ -66,6 +93,11 @@ internal static class CloudHost
 
                 return ValueTask.CompletedTask; // the body is the status-code page (CloudError envelope)
             };
+            // Per IP, on top of the per-account lockout and per-account mail budget.
+            o.AddPolicy(AuthApi.AuthRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1) }));
+            o.AddPolicy(AuthApi.MailRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) }));
             o.AddPolicy(CloudApi.RegisterRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
                 http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) }));
         });
@@ -84,6 +116,7 @@ internal static class CloudHost
         ArgumentNullException.ThrowIfNull(app);
         app.UseStatusCodePages(CloudApi.WriteStatusCodeError);
         app.Use(CloudApi.HandleErrors);
+        app.Use((http, next) => AuthApi.GuardAsync(http, next, http.RequestServices.GetRequiredService<AuthSettings>()));
         app.UseRateLimiter();
         app.UseAuthentication();
         app.UseAuthorization();

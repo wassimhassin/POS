@@ -11,7 +11,7 @@
 // installed service is not used). Usage: node tests/e2e/cloud-sync.mjs
 
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 process.removeAllListeners('warning');
 const { DatabaseSync } = await import('node:sqlite');
@@ -68,7 +68,16 @@ await runTest('cloud-sync', async (session) => {
   const gwDir = path.join(dir, 'gateway');
   const pg = await startPostgres(dir);
   const certPassword = randomBytes(18).toString('base64url');
-  const cloudEnv = { ...process.env, POS_CLOUD_DB: pg.app, POS_CLOUD_MIGRATION_DB: pg.owner, POS_CLOUD_CERT_PASSWORD: certPassword };
+  const mailDir = path.join(dir, 'mail');
+  mkdirSync(mailDir, { recursive: true });
+  const cloudEnv = {
+    ...process.env,
+    POS_CLOUD_DB: pg.app,
+    POS_CLOUD_MIGRATION_DB: pg.owner,
+    POS_CLOUD_CERT_PASSWORD: certPassword,
+    POS_CLOUD_PUBLIC_ORIGIN: 'https://dashboard.test',
+    POS_CLOUD_MAIL_DIR: mailDir,
+  };
   const cloudCli = (...args) => {
     const out = execFileSync(clExe, args, { encoding: 'utf8', env: cloudEnv });
     return Object.fromEntries(out.split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1).trim()]));

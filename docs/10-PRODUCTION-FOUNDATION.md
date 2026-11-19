@@ -223,8 +223,8 @@ in files that are committed or shipped. Production secrets come from the hosting
 |---|---|---|---|
 | Cloud | `POS_CLOUD_DB` (DML role), `POS_CLOUD_MIGRATION_DB` (owner) | Env | Secret store |
 | Cloud | TLS certificate | `--certificate` pfx + `POS_CLOUD_CERT_PASSWORD` | TLS terminated by the platform proxy with a public CA certificate, or a Kestrel certificate from the secret store |
-| Cloud | Identity data-protection keys, cookie settings, entitlement signing key | — | Persisted protected key ring; signing key in a KMS/HSM-backed store, rotated, never in the database |
-| Cloud | Public base URLs (dashboard, QR), allowed origins | — | Env, per environment |
+| Cloud | Identity data-protection keys, cookie settings, entitlement signing key | Sessions/tokens need no key ring (ADR-015/016); entitlement key — | Persisted protected key ring; signing key in a KMS/HSM-backed store, rotated, never in the database |
+| Cloud | Public base URLs (dashboard, QR), allowed origins | `POS_CLOUD_PUBLIC_ORIGIN` (dashboard), `POS_CLOUD_MAIL_DIR` (2.1B) | Env, per environment; mail via a provider adapter |
 | Gateway | `POS_GATEWAY_DATA_DIR`, `--listen`, sync options | Env/CLI | Set by the installer; the service runs under its own account (exists in the install script) |
 | Gateway | Cloud URL, credential | `cloud-link` (DPAPI) | Same; certificate pin optional once a public CA is used |
 | POS | Data directory, WebView2 runtime | Defaults + guard | Installer-managed |
@@ -323,7 +323,9 @@ API conventions in code, OpenAPI, RLS and CI. Suggested first slice inside 2.1:
 4. Cross-tenant tests extended to the new endpoints.
 
 Phase 2.1A (CI, error envelope, `/v1` group, OpenAPI, configuration validation) is done: see
-[11-CI-AND-API-FOUNDATIONS.md](11-CI-AND-API-FOUNDATIONS.md). Identity, RBAC, RLS and the management API remain.
+[11-CI-AND-API-FOUNDATIONS.md](11-CI-AND-API-FOUNDATIONS.md). Phase 2.1B (cloud user authentication: Identity,
+sessions, MFA, password reset, invitation-only owner onboarding, audit) is done: see
+[12-CLOUD-AUTHENTICATION.md](12-CLOUD-AUTHENTICATION.md). RBAC, RLS and the management API remain.
 
 ---
 

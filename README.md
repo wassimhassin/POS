@@ -303,3 +303,20 @@ decisions are logged in [docs/DECISIONS.md](docs/DECISIONS.md). Planning only; n
 - **Configuration:** settings are validated at startup; `check-config` validates without starting.
 
 See [docs/11-CI-AND-API-FOUNDATIONS.md](docs/11-CI-AND-API-FOUNDATIONS.md).
+
+## Cloud user authentication (Phase 2.1B)
+
+- **Accounts:** ASP.NET Core Identity on PostgreSQL. Registration requires email verification; login, logout and
+  password reset are covered, with lockout after 5 failures.
+- **Sessions:** server-side, revocable and rotated, in a `__Host-` cookie (Secure, HttpOnly, SameSite=Strict).
+  Users can list their sessions and revoke them.
+- **MFA:** TOTP plus recovery codes. Mandatory for organization owners.
+- **Onboarding:** invitation only (`Pos.Cloud owner-invite --org <id> --email <address>`). There is no public
+  organization creation.
+- **Separation:** gateway signatures and report keys are unchanged, and none of the three credentials opens
+  another's endpoints.
+- **Abuse resistance:** anti-enumeration answers, per-IP rate limits, an origin check, and an append-only audit log
+  without secrets.
+- **New required settings:** `POS_CLOUD_PUBLIC_ORIGIN` and `POS_CLOUD_MAIL_DIR`.
+
+See [docs/12-CLOUD-AUTHENTICATION.md](docs/12-CLOUD-AUTHENTICATION.md) for the architecture, decisions and limitations.

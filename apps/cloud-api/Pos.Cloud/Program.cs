@@ -19,6 +19,7 @@ using Pos.Sync;
 //                                                                       revokes the branch's active gateway on use
 //   Pos.Cloud gateways        [--branch <guid>]
 //   Pos.Cloud gateway-revoke  --gateway <guid>
+//   Pos.Cloud owner-invite    --org <guid> --email <address>     emails a one-time owner invitation (72 h; MFA required to accept)
 //   Pos.Cloud report-key      --org <guid> [--business <guid> [--branch <guid>]] --name <name>
 //   Pos.Cloud dev-cert        --out <file.pfx> [--host <name-or-ip>]...  (POS_CLOUD_CERT_PASSWORD)
 //   Pos.Cloud run             --listen https://<ip>:<port> --certificate <file.pfx> [--openapi]  (--openapi serves /openapi/v1.json)
@@ -176,6 +177,22 @@ try
         case "run":
             return await RunAsync(options, loggerFactory, log);
 
+        case "owner-invite":
+        {
+            // Platform-operator onboarding of an organization's first owner: there is no public way to create an
+            // organization or a privileged account. The one-time link is only emailed, never printed or logged.
+            var organizationId = options.Id("org") ?? throw new CliException("Option requise : --org");
+            var email = options.Required("email");
+            var problems = new List<string>();
+            var auth = CloudSettings.LoadAuth(Environment.GetEnvironmentVariable, problems) ?? throw new CliException(string.Join(" ", problems));
+            await using var app = CloudHost.Build(Cli.ConnectionString(CloudSettings.RuntimeDb), auth, loggerFactory, kestrel: null);
+            await using var scope = app.Services.CreateAsyncScope();
+            var expires = await scope.ServiceProvider.GetRequiredService<Pos.Cloud.Identity.AuthService>().InviteOwnerAsync(organizationId, email, CancellationToken.None);
+            Console.WriteLine("invite=sent");
+            Console.WriteLine($"expires_at={expires:O}");
+            return 0;
+        }
+
         case "check-config":
             return await CheckConfigAsync(options, log);
 
@@ -207,7 +224,7 @@ static async Task<int> RunAsync(Cli options, ILoggerFactory loggerFactory, ILogg
         return 2;
     }
 
-    var app = CloudHost.Build(settings.ConnectionString, loggerFactory, kestrel => kestrel.Listen(settings.Listen, o => o.UseHttps(settings.Certificate)));
+    var app = CloudHost.Build(settings.ConnectionString, settings.Auth, loggerFactory, kestrel => kestrel.Listen(settings.Listen, o => o.UseHttps(settings.Certificate)));
 
     // Refuse to serve on an outdated schema (migrations are applied separately, by the schema owner).
     await using (var scope = app.Services.CreateAsyncScope())
@@ -279,6 +296,15 @@ static async Task<int> CheckConfigAsync(Cli options, ILogger log)
         {
             errors.Add($"{CloudSettings.RuntimeDb} : le rôle applicatif ne doit avoir que des droits sur les données (ni superutilisateur, ni CREATE sur le schéma).");
         }
+
+        // The security log is append-only for the service: GRANT SELECT, INSERT only (doc 12).
+        var auditWritable = await db.Database.SqlQueryRaw<bool>(
+            "SELECT has_table_privilege(current_user, 'auth_audit_events', 'UPDATE') OR has_table_privilege(current_user, 'auth_audit_events', 'DELETE') AS \"Value\"")
+            .SingleAsync();
+        if (auditWritable)
+        {
+            errors.Add($"{CloudSettings.RuntimeDb} : le rôle applicatif ne doit pas pouvoir modifier ni supprimer le journal de sécurité (REVOKE UPDATE, DELETE ON auth_audit_events).");
+        }
     }
     catch (Exception ex) when (ex is Npgsql.NpgsqlException or InvalidOperationException or TimeoutException)
     {
@@ -302,7 +328,7 @@ static async Task<int> WriteOpenApiAsync(Cli options, ILoggerFactory loggerFacto
 {
     var path = Path.GetFullPath(options.Required("out"));
     // A syntactically valid placeholder: the document is generated from endpoint metadata, the database is never opened.
-    await using var app = CloudHost.Build("Host=openapi.invalid;Database=none;Username=none", loggerFactory, kestrel: null);
+    await using var app = CloudHost.Build("Host=openapi.invalid;Database=none;Username=none", new Pos.Cloud.Identity.AuthSettings("https://openapi.invalid", Path.GetTempPath()), loggerFactory, kestrel: null);
     CloudHost.UsePipeline(app, exposeOpenApi: false);
     await app.StartAsync(); // no-op server: nothing listens
     var json = await CloudHost.OpenApiJsonAsync(app);

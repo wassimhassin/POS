@@ -1,7 +1,9 @@
 using System.Text;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Pos.Cloud.Identity;
 
 namespace Pos.Cloud;
 
@@ -157,7 +159,8 @@ public sealed class ReportKey
     public DateTimeOffset? RevokedAt { get; set; }
 }
 
-public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(options)
+/// <summary>One context for the modular monolith (doc 10 §3). Identity's user tables come from <see cref="IdentityUserContext{TUser, TKey}"/>.</summary>
+public sealed class CloudDb(DbContextOptions<CloudDb> options) : IdentityUserContext<CloudUser, Guid>(options)
 {
     public DbSet<Organization> Organizations => Set<Organization>();
     public DbSet<Business> Businesses => Set<Business>();
@@ -170,17 +173,24 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
     public DbSet<BranchOrderLine> OrderLines => Set<BranchOrderLine>();
     public DbSet<BranchProduct> BranchProducts => Set<BranchProduct>();
     public DbSet<ReportKey> ReportKeys => Set<ReportKey>();
+    public DbSet<UserSession> UserSessions => Set<UserSession>();
+    public DbSet<AuthToken> AuthTokens => Set<AuthToken>();
+    public DbSet<UserMfa> UserMfa => Set<UserMfa>();
+    public DbSet<RecoveryCode> RecoveryCodes => Set<RecoveryCode>();
+    public DbSet<OrganizationMembership> OrganizationMemberships => Set<OrganizationMembership>();
+    public DbSet<AuthAuditEvent> AuthAuditEvents => Set<AuthAuditEvent>();
 
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    protected override void OnModelCreating(ModelBuilder builder)
     {
-        ArgumentNullException.ThrowIfNull(modelBuilder);
-        modelBuilder.Entity<Organization>(e =>
+        ArgumentNullException.ThrowIfNull(builder);
+        base.OnModelCreating(builder);
+        builder.Entity<Organization>(e =>
         {
             e.HasKey(x => x.Id);
             e.Property(x => x.Name).HasMaxLength(120);
         });
 
-        modelBuilder.Entity<Business>(e =>
+        builder.Entity<Business>(e =>
         {
             e.HasKey(x => x.Id);
             e.HasAlternateKey(x => new { x.OrganizationId, x.Id });
@@ -189,7 +199,7 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
             e.HasOne<Organization>().WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Restrict);
         });
 
-        modelBuilder.Entity<Branch>(e =>
+        builder.Entity<Branch>(e =>
         {
             e.HasKey(x => x.Id);
             e.HasAlternateKey(x => new { x.OrganizationId, x.BusinessId, x.Id });
@@ -201,7 +211,7 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
-        modelBuilder.Entity<GatewayCredential>(e =>
+        builder.Entity<GatewayCredential>(e =>
         {
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.PublicKeySha256).IsUnique();
@@ -212,21 +222,21 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
             BranchOwned(e);
         });
 
-        modelBuilder.Entity<ProvisioningCode>(e =>
+        builder.Entity<ProvisioningCode>(e =>
         {
             e.HasKey(x => x.CodeHash);
             e.Property(x => x.CodeHash).HasMaxLength(64);
             BranchOwned(e);
         });
 
-        modelBuilder.Entity<BranchSyncState>(e =>
+        builder.Entity<BranchSyncState>(e =>
         {
             e.HasKey(x => x.BranchId);
             e.ToTable(t => t.HasCheckConstraint("ck_branch_sync_states_last_sequence", "last_sequence >= 0"));
             BranchOwned(e);
         });
 
-        modelBuilder.Entity<SyncEventRecord>(e =>
+        builder.Entity<SyncEventRecord>(e =>
         {
             e.HasKey(x => new { x.BranchId, x.Sequence });
             e.HasIndex(x => new { x.BranchId, x.EventId }).IsUnique();
@@ -239,7 +249,7 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
             e.HasOne<GatewayCredential>().WithMany().HasForeignKey(x => x.GatewayId).OnDelete(DeleteBehavior.Restrict);
         });
 
-        modelBuilder.Entity<BranchOrder>(e =>
+        builder.Entity<BranchOrder>(e =>
         {
             e.ToTable("orders", t =>
             {
@@ -260,14 +270,14 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
             BranchOwned(e);
         });
 
-        modelBuilder.Entity<BranchOrderLine>(e =>
+        builder.Entity<BranchOrderLine>(e =>
         {
             e.ToTable("order_lines", t => t.HasCheckConstraint("ck_order_lines_quantity", "quantity BETWEEN 1 AND 999"));
             e.HasKey(x => new { x.BranchId, x.OrderId, x.ProductId });
             e.Property(x => x.ProductId).HasMaxLength(64);
         });
 
-        modelBuilder.Entity<BranchProduct>(e =>
+        builder.Entity<BranchProduct>(e =>
         {
             e.HasKey(x => new { x.BranchId, x.ProductId });
             e.Property(x => x.ProductId).HasMaxLength(64);
@@ -275,7 +285,7 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
             BranchOwned(e);
         });
 
-        modelBuilder.Entity<ReportKey>(e =>
+        builder.Entity<ReportKey>(e =>
         {
             e.HasKey(x => x.Id);
             e.Property(x => x.SecretSha256).HasMaxLength(64);
@@ -288,7 +298,8 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : DbContext(optio
                 .HasPrincipalKey(x => new { x.OrganizationId, x.BusinessId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
-        ApplySnakeCase(modelBuilder);
+        IdentityModel.Configure(builder);
+        ApplySnakeCase(builder);
     }
 
     private static void BranchOwned<T>(EntityTypeBuilder<T> e) where T : class =>

@@ -87,7 +87,7 @@ export async function startPostgres(dir) {
     app: `Host=127.0.0.1;Port=${port};Username=pos_app;Password=${appPassword};Database=${db}`,
     psql: (sql) => psql(db, sql),
     grantApp: () =>
-      psql(db, `GRANT USAGE ON SCHEMA public TO pos_app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app;`),
+      psql(db, `GRANT USAGE ON SCHEMA public TO pos_app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app; REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app;`),
     stop,
   };
 }

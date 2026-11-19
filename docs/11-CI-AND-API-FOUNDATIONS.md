@@ -152,6 +152,8 @@ That makes it suitable as a deploy/readiness step.
 | `--certificate` + `POS_CLOUD_CERT_PASSWORD` | File exists; password ≥ 12 characters; opens with that password; has a private key; currently valid | Error |
 | Certificate | Expires in < 30 days | Warning |
 | Database (`check-config` only) | Reachable as the runtime role; no pending migration; role is neither superuser nor allowed `CREATE` on `public` | Error |
+| `POS_CLOUD_PUBLIC_ORIGIN`, `POS_CLOUD_MAIL_DIR` (2.1B) | https origin without path; existing writable absolute directory | Error |
+| Database (`check-config`, 2.1B) | Runtime role has no `UPDATE`/`DELETE` on `auth_audit_events` | Error |
 
 Messages name the setting at fault and **never its value**. Parser and driver messages, which can quote a connection
 string, a host or a user, are not forwarded; only the exception class is shown. Tests check this with a marker secret
@@ -195,6 +197,7 @@ tests and left the product code alone, which is also what CI's slower shared run
 
 1. Push and watch the first CI runs; fix any runner-specific issues. Then pin actions to SHAs and add dependency and secret scanning.
 2. Identity: users, organization memberships, roles and permissions catalog, branch-scoped assignments (ADR-006).
+   *User authentication was done in 2.1B (doc 12); roles, permissions and assignments remain.*
 3. PostgreSQL RLS on `pos_app` (ADR-003), checked in `check-config`.
 4. Management API for organizations, businesses and branches with an audit log, following §2's envelope, cursor paging and the
    OpenAPI snapshot.

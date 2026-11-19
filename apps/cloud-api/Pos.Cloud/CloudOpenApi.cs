@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
+using Pos.Cloud.Identity;
 using Pos.Sync;
 
 namespace Pos.Cloud;
@@ -16,6 +17,7 @@ internal static class CloudOpenApi
     public const string Route = "/openapi/{documentName}.json";
     private const string GatewayScheme = "PosGateway";
     private const string ReportScheme = "ReportKey";
+    private const string SessionScheme = "Session";
 
     public static void Configure(OpenApiOptions options)
     {
@@ -27,7 +29,8 @@ internal static class CloudOpenApi
                 Version = DocumentName,
                 Description = "Branch gateway synchronization and read-only reports. Every error body is the envelope "
                     + "{ \"code\", \"message\" }: clients act on `code`; `message` is human-readable (French). "
-                    + "Out-of-scope and non-existent resources are both 404.",
+                    + "Out-of-scope and non-existent resources are both 404. Cloud users authenticate with a session cookie "
+                    + "(/v1/auth, /v1/me); gateways and report keys are separate schemes.",
             };
             document.Servers = [];
             document.Components ??= new OpenApiComponents();
@@ -48,6 +51,14 @@ internal static class CloudOpenApi
                     BearerFormat = "posrk",
                     Description = "Read-only report key scoped to an organization, a business or a branch.",
                 },
+                [SessionScheme] = new OpenApiSecurityScheme
+                {
+                    Type = SecuritySchemeType.ApiKey,
+                    In = ParameterLocation.Cookie,
+                    Name = SessionService.CookieName,
+                    Description = "Cloud user session (HttpOnly, Secure, SameSite=Strict cookie set by login). Unsafe requests from a "
+                        + "browser must come from the configured dashboard origin. 403 mfa_required: finish or enrol the second factor.",
+                },
             };
             return Task.CompletedTask;
         });
@@ -61,7 +72,13 @@ internal static class CloudOpenApi
             }
 
             var policy = metadata.OfType<IAuthorizeData>().Select(a => a.Policy).LastOrDefault(p => p is not null);
-            var scheme = policy == CloudApi.ReportPolicy ? ReportScheme : GatewayScheme;
+            var scheme = policy switch
+            {
+                CloudApi.ReportPolicy => ReportScheme,
+                CloudApi.GatewayPolicy => GatewayScheme,
+                AuthApi.UserPolicy or AuthApi.EnrollingPolicy or AuthApi.ChallengePolicy or AuthApi.AnySessionPolicy => SessionScheme,
+                _ => GatewayScheme, // fallback policy (gateway or report credentials)
+            };
             operation.Security = [new OpenApiSecurityRequirement { [new OpenApiSecuritySchemeReference(scheme, context.Document)] = [] }];
             return Task.CompletedTask;
         });
@@ -70,7 +87,7 @@ internal static class CloudOpenApi
         options.AddSchemaTransformer((schema, context, _) =>
         {
             if (context.JsonTypeInfo.Kind == System.Text.Json.Serialization.Metadata.JsonTypeInfoKind.Object
-                && context.JsonTypeInfo.Type.Namespace == typeof(SyncBatch).Namespace)
+                && context.JsonTypeInfo.Type.Namespace is { } ns && (ns == typeof(SyncBatch).Namespace || ns == typeof(AuthStatus).Namespace))
             {
                 schema.AdditionalPropertiesAllowed = false;
             }
