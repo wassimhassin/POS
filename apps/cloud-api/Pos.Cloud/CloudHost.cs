@@ -71,6 +71,8 @@ internal static class CloudHost
         builder.Services.AddScoped<AuthService>();
         builder.Services.AddScoped<OrganizationAccess>();
         builder.Services.AddScoped<MembershipService>();
+        builder.Services.AddScoped<StructureService>();
+        builder.Services.AddScoped<StructureService>();
         builder.Services.AddIdentityCore<CloudUser>(o =>
             {
                 // Length over composition rules (NIST SP 800-63B); upper bound in AuthService (hashing cost).
@@ -116,6 +118,8 @@ internal static class CloudHost
                 http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1) }));
             o.AddPolicy(AuthApi.MailRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
                 http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) }));
+            o.AddPolicy(AuthApi.ManageRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1) }));
             o.AddPolicy(CloudApi.RegisterRateLimit, http => RateLimitPartition.GetFixedWindowLimiter(
                 http.Connection.RemoteIpAddress?.ToString() ?? "?", _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) }));
         });

@@ -35,12 +35,13 @@ Migration `CloudAccessControl` is additive. Existing owner memberships become or
 | `members.read` | List active members whose scope lies inside one's scope |
 | `members.invite` | Invite (and list or cancel invitations) for roles below one's own, inside one's scope |
 | `members.manage` | Change the role and scope of, or revoke, members below one's own role, inside one's scope |
+| `organization.manage`, `businesses.manage`, `branches.manage` | Structure management (Phase 2.1F, [doc 16](16-CLOUD-STRUCTURE-MANAGEMENT.md)) |
 
 | Role | Rank | Permissions | Allowed scope |
 |---|---|---|---|
 | Owner | 4 | all | organization |
-| Admin | 3 | all | organization |
-| Manager | 2 | `organization.read`, `members.read` | organization, business or branch |
+| Admin | 3 | all except `organization.manage` | organization |
+| Manager | 2 | `organization.read`, `members.read`, `branches.manage` | organization, business or branch |
 | Viewer | 1 | `organization.read` | organization, business or branch |
 
 Permission codes are stable data (API responses, audit details). Later phases add codes (catalog, staff, reports…) and

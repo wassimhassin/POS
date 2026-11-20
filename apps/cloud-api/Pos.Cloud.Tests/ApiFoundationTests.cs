@@ -154,7 +154,7 @@ public sealed class ApiFoundationTests : IAsyncLifetime
             var operations = document["paths"]!.AsObject()
                 .SelectMany(p => p.Value!.AsObject().Select(o => (Path: p.Key, Method: o.Key, Operation: o.Value!)))
                 .ToList();
-            Assert.Equal(36, operations.Count);
+            Assert.Equal(46, operations.Count);
             Assert.All(operations, o => Assert.StartsWith("/v1/", o.Path, StringComparison.Ordinal));
             Assert.All(operations, o => Assert.NotNull(o.Operation["responses"]!["401"]));
             foreach (var (opPath, method, operation) in operations)

@@ -29,10 +29,12 @@ using Pos.Sync;
 //   Pos.Cloud run             --listen https://<ip>:<port> --certificate <file.pfx> [--openapi]  (--openapi serves /openapi/v1.json)
 //   Pos.Cloud check-config    --listen https://<ip>:<port> --certificate <file.pfx>   validates settings + database, no listener
 //   Pos.Cloud openapi         --out <file.json>                                       writes the OpenAPI document (no database)
+//   Pos.Cloud platform-grants --role <name>                                           prints the platform role's exact GRANTs (no database)
 //
 // The service, cleanup, mfa-rekey and check-config use POS_CLOUD_DB: a data-only role subject to row-level security
 // (doc 15). Platform commands (org/business/branch-create, gateway-code, gateways, gateway-revoke, report-key,
-// owner-invite) use POS_CLOUD_ADMIN_DB, or POS_CLOUD_MIGRATION_DB when unset: a role that bypasses it. Audited.
+// owner-invite) require POS_CLOUD_ADMIN_DB: a dedicated BYPASSRLS role with exactly the grants of doc 16 (never the
+// schema owner of POS_CLOUD_MIGRATION_DB, never the runtime role). Every one of them is audited.
 // No secret is hard-coded: connection strings and the certificate password come from the environment.
 
 var command = args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0] : "run";
@@ -133,7 +135,21 @@ try
         {
             await using var db = await Cli.PlatformDbAsync();
             var branchId = options.Id("branch");
-            foreach (var g in await db.GatewayCredentials.Where(g => branchId == null || g.BranchId == branchId).OrderBy(g => g.RegisteredAt).ToListAsync())
+            var gateways = await db.GatewayCredentials.AsNoTracking().Where(g => branchId == null || g.BranchId == branchId).OrderBy(g => g.RegisteredAt).ToListAsync();
+            // Reading another organization's devices is tenant access too: one audit row per organization listed.
+            var listed = gateways.GroupBy(g => g.OrganizationId).ToDictionary(g => g.Key, g => g.Count());
+            if (branchId is { } listedBranch && await db.Branches.AsNoTracking().Where(b => b.Id == listedBranch).Select(b => (Guid?)b.OrganizationId).SingleOrDefaultAsync() is { } owner)
+            {
+                listed.TryAdd(owner, 0);
+            }
+
+            foreach (var (organizationId, count) in listed)
+            {
+                Cli.Audit(db, PlatformEvents.GatewaysListed, organizationId, $"branch={(branchId is { } b ? b.ToString("D") : "*")};count={count}");
+            }
+
+            await db.SaveChangesAsync();
+            foreach (var g in gateways)
             {
                 Console.WriteLine($"{g.Id:D} branch={g.BranchId:D} registered={g.RegisteredAt:O} revoked={g.RevokedAt?.ToString("O", CultureInfo.InvariantCulture) ?? "-"} seen={g.LastSeenAt?.ToString("O", CultureInfo.InvariantCulture) ?? "-"}");
             }
@@ -203,7 +219,7 @@ try
             var problems = new List<string>();
             var auth = CloudSettings.LoadAuth(Environment.GetEnvironmentVariable, problems) ?? throw new CliException(string.Join(" ", problems));
             await (await Cli.PlatformDbAsync()).DisposeAsync(); // checks the platform role before anything is sent
-            await using var app = CloudHost.Build(Cli.ConnectionString(Cli.PlatformVariable), auth, loggerFactory, kestrel: null, backgroundMail: false);
+            await using var app = CloudHost.Build(Cli.ConnectionString(CloudSettings.AdminDb), auth, loggerFactory, kestrel: null, backgroundMail: false);
             await using var scope = app.Services.CreateAsyncScope();
             var expires = await scope.ServiceProvider.GetRequiredService<Pos.Cloud.Identity.AuthService>().InviteOwnerAsync(organizationId, email, CancellationToken.None);
             Console.WriteLine("invite=sent");
@@ -259,6 +275,19 @@ try
 
         case "openapi":
             return await WriteOpenApiAsync(options, loggerFactory);
+
+        case "platform-grants":
+        {
+            // The exact grants of the dedicated platform role (doc 16 §4), to apply as the schema owner after each migration.
+            var role = options.Required("role");
+            if (!System.Text.RegularExpressions.Regex.IsMatch(role, "^[a-z_][a-z0-9_]{0,62}$"))
+            {
+                throw new CliException("--role : identifiant SQL simple attendu (minuscules, chiffres, _).");
+            }
+
+            Console.WriteLine(PlatformRole.GrantSql(role));
+            return 0;
+        }
 
         default:
             Console.Error.WriteLine($"Commande inconnue : {command}");
@@ -332,6 +361,28 @@ static CloudRunSettings? ValidatedSettings(Cli options, ILogger log)
 /// Deploy-time check, without listening: the same validation as <c>run</c>, then the database as the runtime role
 /// (reachable, schema up to date, no DDL privilege, not a superuser). Exit 0 = ready to run.
 /// </summary>
+/// <summary>The platform role (doc 16 §4), when POS_CLOUD_ADMIN_DB is configured on this host: exact grants, BYPASSRLS, not owner.</summary>
+static async Task<List<string>> CheckPlatformRoleAsync()
+{
+    if (Environment.GetEnvironmentVariable(CloudSettings.AdminDb) is not { Length: > 0 } platform)
+    {
+        Console.WriteLine("platform_role=not_configured");
+        return [];
+    }
+
+    try
+    {
+        await using var admin = new CloudDb(new DbContextOptionsBuilder<CloudDb>().UseNpgsql(platform).Options);
+        var problems = await PlatformRole.CheckAsync(admin, CloudSettings.AdminDb);
+        Console.WriteLine($"platform_role={(problems.Count == 0 ? "ok" : "invalid")}");
+        return problems;
+    }
+    catch (Exception ex) when (ex is Npgsql.NpgsqlException or InvalidOperationException or TimeoutException or ArgumentException)
+    {
+        return [$"{CloudSettings.AdminDb} : connexion impossible ({ex.GetType().Name}{(ex is Npgsql.PostgresException pg ? " " + pg.SqlState : "")})."];
+    }
+}
+
 static async Task<int> CheckConfigAsync(Cli options, ILogger log)
 {
     using var settings = ValidatedSettings(options, log);
@@ -381,6 +432,7 @@ static async Task<int> CheckConfigAsync(Cli options, ILogger log)
         if (pending.Count == 0)
         {
             errors.AddRange(await RowLevelSecurity.CheckAsync(db));
+            errors.AddRange(await CheckPlatformRoleAsync());
         }
 
         if (pending.Count == 0)
@@ -535,26 +587,32 @@ internal sealed class Cli
     public static CloudDb Db(string variable = "POS_CLOUD_DB") =>
         new(new DbContextOptionsBuilder<CloudDb>().UseNpgsql(ConnectionString(variable)).Options);
 
-    /// <summary>The platform-operations connection: POS_CLOUD_ADMIN_DB, else the schema owner's POS_CLOUD_MIGRATION_DB.</summary>
-    public static string PlatformVariable =>
-        Environment.GetEnvironmentVariable(CloudSettings.AdminDb) is { Length: > 0 } ? CloudSettings.AdminDb : CloudSettings.MigrationDb;
-
     /// <summary>
-    /// Opens the platform connection and verifies its role is exempt from row-level security (superuser, BYPASSRLS or
-    /// owner of the tables): the runtime role sees no tenant data outside a tenant transaction, so it cannot provision.
+    /// Opens the platform connection (POS_CLOUD_ADMIN_DB, required) and verifies it is the dedicated platform role:
+    /// a user distinct from the runtime and migration users, BYPASSRLS (the runtime role sees no tenant data outside a
+    /// tenant transaction), not superuser or owner, and holding exactly the grants of doc 16 (<see cref="PlatformRole"/>).
     /// </summary>
     public static async Task<CloudDb> PlatformDbAsync()
     {
-        var variable = PlatformVariable;
+        var variable = CloudSettings.AdminDb;
+        var connection = ConnectionString(variable);
+        var user = new Npgsql.NpgsqlConnectionStringBuilder(connection).Username;
+        foreach (var other in new[] { CloudSettings.RuntimeDb, CloudSettings.MigrationDb })
+        {
+            if (Environment.GetEnvironmentVariable(other) is { Length: > 0 } value
+                && string.Equals(new Npgsql.NpgsqlConnectionStringBuilder(value).Username, user, StringComparison.Ordinal))
+            {
+                throw new CliException($"{variable} : opération de plateforme refusée ; le rôle de plateforme doit être distinct de celui de {other}.");
+            }
+        }
+
         var db = Db(variable);
         try
         {
-            var exempt = await db.Database.SqlQueryRaw<bool>(
-                "SELECT (r.rolsuper OR r.rolbypassrls OR pg_has_role(current_user, c.relowner, 'USAGE')) AS \"Value\" " +
-                "FROM pg_roles r, pg_class c WHERE r.rolname = current_user AND c.oid = 'public.organizations'::regclass").SingleAsync();
-            if (!exempt)
+            var problems = await PlatformRole.CheckAsync(db, variable);
+            if (problems.Count > 0)
             {
-                throw new CliException($"{variable} : opération de plateforme refusée ; ce rôle est soumis à la sécurité par ligne (utilisez le propriétaire du schéma ou un rôle BYPASSRLS dédié).");
+                throw new CliException(string.Join(" ", problems));
             }
 
             return db;

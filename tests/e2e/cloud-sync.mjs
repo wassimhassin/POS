@@ -74,6 +74,7 @@ await runTest('cloud-sync', async (session) => {
     ...process.env,
     POS_CLOUD_DB: pg.app,
     POS_CLOUD_MIGRATION_DB: pg.owner,
+    POS_CLOUD_ADMIN_DB: pg.platform,
     POS_CLOUD_CERT_PASSWORD: certPassword,
     POS_CLOUD_PUBLIC_ORIGIN: 'https://dashboard.test',
     POS_CLOUD_MAIL_DIR: mailDir,
@@ -127,6 +128,7 @@ await runTest('cloud-sync', async (session) => {
     // --- Cloud provisioning (cloud operator) ---
     assert(cloudCli('migrate').schema.includes('InitialCloudSchema'), 'cloud schema migrated by the owner role');
     pg.grantApp();
+    pg.grantPlatform(execFileSync(clExe, ['platform-grants', '--role', 'pos_platform'], { encoding: 'utf8', env: cloudEnv }));
     const pin = cloudCli('dev-cert', '--out', path.join(dir, 'cloud.pfx'), '--host', '127.0.0.1').sha256;
     const ca = readFileSync(path.join(dir, 'cloud.pem'));
 

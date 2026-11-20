@@ -53,12 +53,14 @@ export function postgresBin() {
 
 /**
  * Throwaway PostgreSQL cluster in `dir` (initdb + pg_ctl, current user, 127.0.0.1, SCRAM passwords). The installed
- * PostgreSQL service is not touched. Returns connection strings for the owner and for a data-only `pos_app` role.
+ * PostgreSQL service is not touched. Returns connection strings for the owner, a data-only `pos_app` role and the
+ * dedicated `pos_platform` role (BYPASSRLS, exact grants printed by `Pos.Cloud platform-grants`, doc 16).
  */
 export async function startPostgres(dir) {
   const bin = postgresBin();
   const password = randomBytes(16).toString('hex');
   const appPassword = randomBytes(16).toString('hex');
+  const platformPassword = randomBytes(16).toString('hex');
   const pwFile = path.join(dir, 'pg-pw.txt');
   writeFileSync(pwFile, password);
   const data = path.join(dir, 'pgdata');
@@ -76,6 +78,7 @@ export async function startPostgres(dir) {
   try {
     psql('postgres', `CREATE DATABASE ${db};`);
     psql('postgres', `CREATE ROLE pos_app LOGIN PASSWORD '${appPassword}';`);
+    psql('postgres', `CREATE ROLE pos_platform LOGIN PASSWORD '${platformPassword}' BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;`);
   } catch (e) {
     stop();
     throw e;
@@ -85,9 +88,12 @@ export async function startPostgres(dir) {
     db,
     owner: `Host=127.0.0.1;Port=${port};Username=postgres;Password=${password};Database=${db}`,
     app: `Host=127.0.0.1;Port=${port};Username=pos_app;Password=${appPassword};Database=${db}`,
+    platform: `Host=127.0.0.1;Port=${port};Username=pos_platform;Password=${platformPassword};Database=${db}`,
     psql: (sql) => psql(db, sql),
     grantApp: () =>
       psql(db, `GRANT USAGE ON SCHEMA public TO pos_app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app; REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app;`),
+    /** Applies the platform grants (SQL printed by `Pos.Cloud platform-grants --role pos_platform`). */
+    grantPlatform: (grants) => psql(db, grants),
     stop,
   };
 }

@@ -33,7 +33,7 @@ internal static class CloudSettings
     public const string RuntimeDb = "POS_CLOUD_DB";
     public const string MigrationDb = "POS_CLOUD_MIGRATION_DB";
 
-    /// <summary>Platform operations (provisioning CLI): a role that bypasses row-level security. Defaults to <see cref="MigrationDb"/>.</summary>
+    /// <summary>Platform operations (provisioning CLI): the dedicated platform role (doc 16 §4); required by those commands.</summary>
     public const string AdminDb = "POS_CLOUD_ADMIN_DB";
     public const string CertificatePassword = "POS_CLOUD_CERT_PASSWORD";
     public const string PublicOrigin = "POS_CLOUD_PUBLIC_ORIGIN";

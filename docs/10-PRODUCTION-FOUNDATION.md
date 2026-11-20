@@ -44,7 +44,7 @@ PowerShell build/test/run scripts; E2E in Node against real processes. There is 
 | Gateway LAN | `/v1/enroll`, `/v1/auth/challenge`, `/v1/auth/token`; `/v1/branches/{id}/me`, `orders` (GET/POST), `orders/{id}` (GET), `items`, `quantity`, `submit`, `print-intents`, `operations/{id}/resolve`; SignalR hub | One-time code + terminal ECDSA key → 1 h bearer token; revocation checked per request; rate limits per IP |
 | Cloud sync | `/v1/gateways/register`, `POST/GET /v1/sync/events`, `GET /v1/sync/state` | Gateway ECDSA signature over method, path, query and body (±5 min) |
 | Cloud reports | `/v1/reports/organizations/{id}`, `businesses/{id}`, `branches/{id}`, `branches/{id}/orders`, `branches/{id}/catalog` | Scoped report keys (`posrk.*`); out-of-scope → 404 |
-| Admin | CLI only (`org-create`, `business-create`, `branch-create`, `gateway-code`, `report-key`, …) | Machine access |
+| Admin | Platform CLI with the dedicated platform role (`org-create`, `gateway-code`, `report-key`, …); businesses and branches also through the management API (doc 16) | Machine access / owner session |
 
 ### 1.4 Reusable as-is (validated — extend, do not rewrite)
 

@@ -131,9 +131,9 @@ public sealed partial class ReportKeyHandler(
             return Fail("malformed");
         }
 
-        var key = await db.ReportKeyAsync(keyId, Context.RequestAborted); // pre-tenant lookup of this one key
-        if (key is null || key.Revoked
-            || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(SyncProtocol.Sha256Hex(Encoding.ASCII.GetBytes(parts[2]))), Encoding.ASCII.GetBytes(key.SecretSha256)))
+        // Pre-tenant lookup of this one key, answered only for the matching secret (256-bit; compared as its SHA-256).
+        var key = await db.ReportKeyAsync(keyId, SyncProtocol.Sha256Hex(Encoding.ASCII.GetBytes(parts[2])), Context.RequestAborted);
+        if (key is null)
         {
             return Fail("invalid key");
         }

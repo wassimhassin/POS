@@ -109,12 +109,12 @@ public sealed class AccessControlTests : IAsyncLifetime
         var ownerAccess = await Access(owner);
         Assert.Equal("owner", ownerAccess.GetProperty("role").GetString());
         Assert.Equal("organization", ownerAccess.GetProperty("scope").GetProperty("kind").GetString());
-        Assert.Equal(["organization.read", "members.read", "members.invite", "members.manage"], ownerAccess.GetProperty("permissions").EnumerateArray().Select(p => p.GetString()));
+        Assert.Equal(["organization.read", "members.read", "members.invite", "members.manage", "organization.manage", "businesses.manage", "branches.manage"], ownerAccess.GetProperty("permissions").EnumerateArray().Select(p => p.GetString()));
         var managerAccess = await Access(manager);
         Assert.Equal("branch", managerAccess.GetProperty("scope").GetProperty("kind").GetString());
         Assert.Equal(s.Business1.ToString("D"), managerAccess.GetProperty("scope").GetProperty("businessId").GetString());
         Assert.Equal(s.BranchA.ToString("D"), managerAccess.GetProperty("scope").GetProperty("branchId").GetString());
-        Assert.Equal(["organization.read", "members.read"], managerAccess.GetProperty("permissions").EnumerateArray().Select(p => p.GetString()));
+        Assert.Equal(["organization.read", "members.read", "branches.manage"], managerAccess.GetProperty("permissions").EnumerateArray().Select(p => p.GetString()));
         Assert.Equal(["organization.read"], (await Access(viewer)).GetProperty("permissions").EnumerateArray().Select(p => p.GetString()));
 
         // Structure, filtered by scope.

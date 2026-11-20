@@ -191,7 +191,7 @@ public sealed partial class SessionHandler(
             return AuthenticateResult.Fail("invalid session");
         }
 
-        var state = valid.Session.Kind == SessionKinds.MfaPending ? MfaStates.Challenge : await FullStateAsync(valid.User.Id);
+        var state = valid.Session.Kind == SessionKinds.MfaPending ? MfaStates.Challenge : await FullStateAsync(valid.Session.Id, valid.User.Id);
         Context.Items[typeof(UserPrincipal)] = new UserPrincipal(valid.User.Id, valid.Session.Id, state);
         var identity = new ClaimsIdentity(
             [
@@ -204,10 +204,10 @@ public sealed partial class SessionHandler(
     }
 
     /// <summary>A privileged user (any live membership) without enabled MFA may only enrol.</summary>
-    private async Task<string> FullStateAsync(Guid userId)
+    private async Task<string> FullStateAsync(Guid sessionId, Guid userId)
     {
         var ct = Context.RequestAborted;
-        var privileged = (await db.UserMembershipsAsync(userId, ct)).Count > 0;
+        var privileged = (await db.SessionMembershipsAsync(sessionId, userId, ct)).Count > 0;
         if (!privileged)
         {
             return MfaStates.Ok;

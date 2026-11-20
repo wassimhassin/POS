@@ -30,9 +30,9 @@ public static class Tenancy
     /// <summary>Functions the runtime role must be able to execute (granted at deploy time; PUBLIC has none).</summary>
     public static readonly IReadOnlyList<string> Functions =
     [
-        "app_current_organization()", "app_enter_tenant(uuid)", "app_gateway_credential(uuid)", "app_report_key(uuid)",
+        "app_current_organization()", "app_enter_tenant(uuid)", "app_gateway_credential(uuid)", "app_report_key(uuid, text)",
         "app_provisioning_code_organization(text)", "app_gateway_key_registered(text)", "app_invitation_organization(bytea)",
-        "app_user_memberships(uuid)", "app_purge_expired_invitations(timestamp with time zone, integer)",
+        "app_session_memberships(uuid, uuid)", "app_purge_expired_invitations(timestamp with time zone, integer)",
     ];
 
     /// <summary>
@@ -80,11 +80,14 @@ public static class Tenancy
             FROM app_gateway_credential({gatewayId})
             """).SingleOrDefaultAsync(ct);
 
-    /// <summary>Report key by id, to verify its secret before the tenant is known.</summary>
-    public static Task<ReportKeyLookup?> ReportKeyAsync(this CloudDb db, Guid keyId, CancellationToken ct) =>
+    /// <summary>
+    /// The scope of an active report key, only when the presented secret's hash matches: without the secret the lookup
+    /// answers nothing (it never returns the stored hash).
+    /// </summary>
+    public static Task<ReportKeyLookup?> ReportKeyAsync(this CloudDb db, Guid keyId, string secretSha256, CancellationToken ct) =>
         db.Database.SqlQuery<ReportKeyLookup>($"""
-            SELECT organization_id AS "OrganizationId", business_id AS "BusinessId", branch_id AS "BranchId", secret_sha256 AS "SecretSha256", revoked AS "Revoked"
-            FROM app_report_key({keyId})
+            SELECT organization_id AS "OrganizationId", business_id AS "BusinessId", branch_id AS "BranchId"
+            FROM app_report_key({keyId}, {secretSha256})
             """).SingleOrDefaultAsync(ct);
 
     /// <summary>The organization a provisioning code (by hash) was issued in, or null.</summary>
@@ -99,12 +102,15 @@ public static class Tenancy
     public static Task<Guid?> InvitationOrganizationAsync(this CloudDb db, byte[] tokenHash, CancellationToken ct) =>
         db.Database.SqlQuery<Guid?>($"""SELECT app_invitation_organization({tokenHash}) AS "Value" """).SingleAsync(ct);
 
-    /// <summary>The live memberships of ONE user (the session's), across organizations.</summary>
-    public static Task<List<UserMembershipLookup>> UserMembershipsAsync(this CloudDb db, Guid userId, CancellationToken ct) =>
+    /// <summary>
+    /// The live memberships of the user of a live (not revoked) session, across organizations: the session must belong to
+    /// the user, so the lookup cannot enumerate an arbitrary user's memberships by id alone.
+    /// </summary>
+    public static Task<List<UserMembershipLookup>> SessionMembershipsAsync(this CloudDb db, Guid sessionId, Guid userId, CancellationToken ct) =>
         db.Database.SqlQuery<UserMembershipLookup>($"""
-            SELECT organization_id AS "OrganizationId", organization_name AS "OrganizationName", role AS "Role", business_id AS "BusinessId",
+            SELECT organization_id AS "OrganizationId", role AS "Role", business_id AS "BusinessId",
                    branch_id AS "BranchId", version AS "Version", created_at AS "CreatedAt"
-            FROM app_user_memberships({userId})
+            FROM app_session_memberships({sessionId}, {userId})
             """).ToListAsync(ct);
 
     /// <summary>Maintenance: deletes up to <paramref name="limit"/> invitations expired before <paramref name="cutoff"/>, in every organization.</summary>
@@ -114,9 +120,9 @@ public static class Tenancy
 
 public sealed record GatewayLookup(Guid OrganizationId, Guid BusinessId, Guid BranchId, byte[] PublicKey, bool Revoked);
 
-public sealed record ReportKeyLookup(Guid OrganizationId, Guid? BusinessId, Guid? BranchId, string SecretSha256, bool Revoked);
+public sealed record ReportKeyLookup(Guid OrganizationId, Guid? BusinessId, Guid? BranchId);
 
-public sealed record UserMembershipLookup(Guid OrganizationId, string OrganizationName, string Role, Guid? BusinessId, Guid? BranchId, int Version, DateTimeOffset CreatedAt);
+public sealed record UserMembershipLookup(Guid OrganizationId, string Role, Guid? BusinessId, Guid? BranchId, int Version, DateTimeOffset CreatedAt);
 
 /// <summary>Endpoint filter: runs the handler inside a tenant transaction of the authenticated principal's organization.</summary>
 public static class TenantEndpoints
@@ -142,6 +148,7 @@ public static class PlatformEvents
     public const string GatewayCodeIssued = "platform_gateway_code_issued";
     public const string GatewayRevoked = "platform_gateway_revoked";
     public const string ReportKeyCreated = "platform_report_key_created";
+    public const string GatewaysListed = "platform_gateways_listed";
     public const string GatewayRegistered = "gateway_registered";
     public const string GatewayReplaced = "gateway_replaced";
 }
@@ -267,5 +274,102 @@ internal static class RowLevelSecurity
         var marker = table.Name == "order_lines" ? "FROM orders" : "app_current_organization()";
         return policies is [["tenant_isolation", "*", "p", var qualifier, var withCheck]]
             && qualifier.Contains(marker, StringComparison.Ordinal) && withCheck.Contains(marker, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// The dedicated platform role (doc 16 §4, ADR-032): provisioning without schema ownership. It bypasses row-level
+/// security (platform commands address any organization by id) but holds exactly the table privileges the commands
+/// need: no DDL, no DELETE or TRUNCATE, no UPDATE except gateway revocation, no access to sales, members or accounts.
+/// </summary>
+public static class PlatformRole
+{
+    public const string Select = "SELECT";
+    public const string Insert = "INSERT";
+    public const string Update = "UPDATE";
+
+    /// <summary>Table → privileges, exact (more is refused, less is reported).</summary>
+    public static readonly IReadOnlyDictionary<string, string[]> Privileges = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["__EFMigrationsHistory"] = [Select],
+        ["organizations"] = [Select, Insert],
+        ["businesses"] = [Select, Insert],
+        ["branches"] = [Select, Insert],
+        ["gateway_credentials"] = [Select, Update],
+        ["branch_sync_states"] = [Insert],
+        ["provisioning_codes"] = [Insert],
+        ["report_keys"] = [Insert],
+        ["auth_tokens"] = [Insert],
+        ["auth_audit_events"] = [Insert],
+    };
+
+    /// <summary>The deploy-time grants for <paramref name="role"/> (an SQL identifier chosen by the operator).</summary>
+    public static string GrantSql(string role)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(role);
+        var lines = new List<string> { $"GRANT USAGE ON SCHEMA public TO {role};" };
+        lines.AddRange(Privileges.Select(p => $"GRANT {string.Join(", ", p.Value)} ON \"{p.Key}\" TO {role};"));
+        lines.Add($"GRANT EXECUTE ON FUNCTION app_current_organization(), app_enter_tenant(uuid) TO {role};");
+        return string.Join('\n', lines);
+    }
+
+    internal sealed record RoleState(string Name, bool Superuser, bool BypassRls, bool Elevated, int OwnedObjects, bool CanCreate);
+
+    internal sealed record Grant(string Table, string Privilege);
+
+    /// <summary>Verifies the CURRENT connection's role is a correctly configured platform role; returns the problems.</summary>
+    internal static async Task<List<string>> CheckAsync(CloudDb db, string variable)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        var errors = new List<string>();
+        var role = await db.Database.SqlQueryRaw<RoleState>("""
+            SELECT r.rolname::text AS "Name", r.rolsuper AS "Superuser", r.rolbypassrls AS "BypassRls",
+                   (r.rolcreaterole OR r.rolcreatedb OR r.rolreplication) AS "Elevated",
+                   (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = 'public' AND pg_has_role(current_user, c.relowner, 'USAGE')) AS "OwnedObjects",
+                   has_schema_privilege(current_user, 'public', 'CREATE') AS "CanCreate"
+            FROM pg_roles r WHERE r.rolname = current_user
+            """).SingleAsync();
+        if (role.Superuser || role.Elevated || role.OwnedObjects > 0 || role.CanCreate)
+        {
+            errors.Add($"{variable} : le rôle de plateforme doit être dédié (ni superutilisateur, ni propriétaire du schéma, ni CREATE/CREATEROLE/CREATEDB/REPLICATION) ; utilisez un rôle distinct de celui des migrations.");
+            return errors; // the privilege detail below is meaningless for an owner or a superuser
+        }
+
+        if (!role.BypassRls)
+        {
+            errors.Add($"{variable} : opération de plateforme refusée ; ce rôle est soumis à la sécurité par ligne (il faut un rôle de plateforme BYPASSRLS dédié).");
+        }
+
+        var held = await db.Database.SqlQueryRaw<Grant>("""
+            SELECT c.relname::text AS "Table", p.privilege AS "Privilege"
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(privilege)
+            WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm') AND has_table_privilege(current_user, c.oid, p.privilege)
+            """).ToListAsync();
+        var excess = held.Where(g => !(Privileges.TryGetValue(g.Table, out var allowed) && allowed.Contains(g.Privilege, StringComparer.Ordinal)))
+            .Select(g => $"{g.Privilege} {g.Table}").Order(StringComparer.Ordinal).ToList();
+        var missing = Privileges.SelectMany(p => p.Value.Select(v => (Table: p.Key, Privilege: v)))
+            .Where(r => !held.Any(g => g.Table == r.Table && g.Privilege == r.Privilege))
+            .Select(r => $"{r.Privilege} {r.Table}").Order(StringComparer.Ordinal).ToList();
+        if (excess.Count > 0)
+        {
+            errors.Add($"{variable} : le rôle de plateforme a des droits superflus ({string.Join(", ", excess.Take(8))}{(excess.Count > 8 ? ", …" : "")}) ; appliquez exactement les GRANT du doc 16.");
+        }
+
+        if (missing.Count > 0)
+        {
+            errors.Add($"{variable} : le rôle de plateforme n'a pas les droits nécessaires ({string.Join(", ", missing.Take(8))}{(missing.Count > 8 ? ", …" : "")}).");
+        }
+
+        var functions = await db.Database.SqlQueryRaw<bool>(
+            "SELECT has_function_privilege(current_user, 'app_enter_tenant(uuid)', 'EXECUTE') AND has_function_privilege(current_user, 'app_current_organization()', 'EXECUTE') AS \"Value\"")
+            .SingleAsync();
+        if (!functions)
+        {
+            errors.Add($"{variable} : le rôle de plateforme ne peut pas exécuter app_enter_tenant/app_current_organization.");
+        }
+
+        return errors;
     }
 }

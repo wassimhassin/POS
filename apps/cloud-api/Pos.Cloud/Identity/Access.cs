@@ -20,7 +20,16 @@ public static class Permissions
     /// <summary>Change the role/scope of, or revoke, members below one's own role, within one's scope.</summary>
     public const string MembersManage = "members.manage";
 
-    public static readonly IReadOnlyList<string> All = [OrganizationRead, MembersRead, MembersInvite, MembersManage];
+    /// <summary>Rename the organization (doc 16).</summary>
+    public const string OrganizationManage = "organization.manage";
+
+    /// <summary>Create businesses and rename businesses within one's scope.</summary>
+    public const string BusinessesManage = "businesses.manage";
+
+    /// <summary>Create branches in a business within one's scope, and rename branches within one's scope.</summary>
+    public const string BranchesManage = "branches.manage";
+
+    public static readonly IReadOnlyList<string> All = [OrganizationRead, MembersRead, MembersInvite, MembersManage, OrganizationManage, BusinessesManage, BranchesManage];
 }
 
 /// <summary>Roles, ranked. A role can only be granted, changed or revoked by a strictly higher role, except by owners.</summary>
@@ -38,8 +47,8 @@ public static class MembershipRoles
     private static readonly Dictionary<string, (int Rank, string[] Permissions)> s_roles = new(StringComparer.Ordinal)
     {
         [Owner] = (4, [.. Identity.Permissions.All]),
-        [Admin] = (3, [.. Identity.Permissions.All]),
-        [Manager] = (2, [Identity.Permissions.OrganizationRead, Identity.Permissions.MembersRead]),
+        [Admin] = (3, [.. Identity.Permissions.All.Where(p => p != Identity.Permissions.OrganizationManage)]),
+        [Manager] = (2, [Identity.Permissions.OrganizationRead, Identity.Permissions.MembersRead, Identity.Permissions.BranchesManage]),
         [Viewer] = (1, [Identity.Permissions.OrganizationRead]),
     };
 
@@ -109,9 +118,9 @@ public sealed class OrganizationAccess(CloudDb db)
     public async Task<MemberAccess?> EvaluateAsync(UserPrincipal principal, Guid organizationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(principal);
-        // The caller's own memberships (pre-tenant lookup by the session's user id): the tenant context is entered
+        // The caller's own memberships (pre-tenant lookup bound to the live session): the tenant context is entered
         // only after this proves membership, so a path naming another organization never opens its rows.
-        var row = (await db.UserMembershipsAsync(principal.UserId, ct)).SingleOrDefault(m => m.OrganizationId == organizationId);
+        var row = (await db.SessionMembershipsAsync(principal.SessionId, principal.UserId, ct)).SingleOrDefault(m => m.OrganizationId == organizationId);
         if (row is null || !MembershipRoles.IsKnown(row.Role) || !await db.Users.AsNoTracking().AnyAsync(u => u.Id == principal.UserId && u.EmailConfirmed, ct))
         {
             return null;
@@ -140,7 +149,15 @@ public sealed partial class OrganizationAccessFilter(OrganizationAccess access, 
             throw NotFound();
         }
 
-        var member = await access.EvaluateAsync(principal, organizationId, http.RequestAborted) ?? throw NotFound();
+        var member = await access.EvaluateAsync(principal, organizationId, http.RequestAborted);
+        if (member is null)
+        {
+            // The membership lookup is bound to a live session: if this request's session was ended meanwhile (e.g. a
+            // concurrent role change by another owner), the caller is signed out (401), not a non-member (404).
+            throw await db.UserSessions.AnyAsync(s => s.Id == principal.SessionId && s.RevokedAt == null, http.RequestAborted)
+                ? NotFound()
+                : new CloudException(401, "unauthorized", "Authentification requise ou refusée.");
+        }
         var required = http.GetEndpoint()?.Metadata.GetMetadata<PermissionRequirement>();
         if (required is null)
         {
@@ -150,7 +167,7 @@ public sealed partial class OrganizationAccessFilter(OrganizationAccess access, 
 
         if (!member.Has(required.Permission))
         {
-            if (required.Permission is Permissions.MembersInvite or Permissions.MembersManage)
+            if (required.Permission is not (Permissions.OrganizationRead or Permissions.MembersRead)) // every refused write is audited
             {
                 await db.InTenantAsync(organizationId, () =>
                 {

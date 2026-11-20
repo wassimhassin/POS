@@ -425,7 +425,7 @@ public sealed partial class AuthService(
     {
         ArgumentNullException.ThrowIfNull(principal);
         var user = await users.FindByIdAsync(principal.UserId.ToString("D")) ?? throw InvalidCredentials();
-        if (await IsPrivilegedAsync(user.Id, ct))
+        if (await IsPrivilegedAsync(principal.SessionId, user.Id, ct))
         {
             throw new CloudException(403, AuthErrors.MfaRequiredForRole, "Les propriétaires doivent garder l'authentification à deux facteurs.");
         }
@@ -455,7 +455,7 @@ public sealed partial class AuthService(
     {
         ArgumentNullException.ThrowIfNull(principal);
         var user = await db.Users.AsNoTracking().SingleAsync(u => u.Id == principal.UserId, ct);
-        var memberships = (await db.UserMembershipsAsync(user.Id, ct))
+        var memberships = (await db.SessionMembershipsAsync(principal.SessionId, user.Id, ct))
             .OrderBy(m => m.CreatedAt)
             .Select(m => new MembershipInfo(m.OrganizationId.ToString(), m.Role))
             .ToList();
@@ -718,8 +718,8 @@ public sealed partial class AuthService(
     private Task<bool> MfaEnabledAsync(Guid userId, CancellationToken ct) =>
         db.UserMfa.AnyAsync(m => m.UserId == userId && m.EnabledAt != null, ct);
 
-    private async Task<bool> IsPrivilegedAsync(Guid userId, CancellationToken ct) =>
-        (await db.UserMembershipsAsync(userId, ct)).Count > 0;
+    private async Task<bool> IsPrivilegedAsync(Guid sessionId, Guid userId, CancellationToken ct) =>
+        (await db.SessionMembershipsAsync(sessionId, userId, ct)).Count > 0;
 
     private async Task FailedAttemptAsync(CloudUser user, string auditEvent, HttpContext http, Guid? sessionId, CancellationToken ct)
     {

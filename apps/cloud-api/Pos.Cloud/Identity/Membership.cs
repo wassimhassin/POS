@@ -525,6 +525,8 @@ public static class MembershipApi
             .AddEndpointFilter<OrganizationAccessFilter>()
             .ProducesErrors(403, 404);
 
+        StructureApi.Map(organization);
+
         organization.MapGet("/access", (HttpContext h) => MembershipService.Access(Member(h)))
             .RequirePermission(Permissions.OrganizationRead)
             .WithName("GetOrganizationAccess").WithSummary("The caller's role, scope and permissions in the organization.")

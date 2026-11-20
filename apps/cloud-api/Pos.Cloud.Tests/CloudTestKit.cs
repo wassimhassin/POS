@@ -29,8 +29,9 @@ public sealed class PostgresCluster
     private readonly string _bin;
     private readonly string _root;
 
-    private PostgresCluster(string bin, string root, int port, string password, string appPassword)
+    private PostgresCluster(string bin, string root, int port, string password, string appPassword, string platformPassword)
     {
+        PlatformPassword = platformPassword;
         _bin = bin;
         _root = root;
         Port = port;
@@ -45,6 +46,8 @@ public sealed class PostgresCluster
     public string Password { get; }
 
     public string AppPassword { get; }
+
+    public string PlatformPassword { get; }
 
     public static string FindBin()
     {
@@ -74,6 +77,7 @@ public sealed class PostgresCluster
         var root = Directory.CreateTempSubdirectory("pos-pg-test-").FullName;
         var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
         var appPassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        var platformPassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
         var passwordFile = Path.Combine(root, "pw.txt");
         File.WriteAllText(passwordFile, password);
         var data = Path.Combine(root, "data");
@@ -82,9 +86,11 @@ public sealed class PostgresCluster
 
         var port = FreePort();
         Tool(bin, "pg_ctl.exe", "-D", data, "-o", $"-p {port} -c listen_addresses=127.0.0.1 -c max_connections=300", "-l", Path.Combine(root, "postgres.log"), "-w", "start");
-        var cluster = new PostgresCluster(bin, root, port, password, appPassword);
+        var cluster = new PostgresCluster(bin, root, port, password, appPassword, platformPassword);
         AppDomain.CurrentDomain.ProcessExit += (_, _) => cluster.Stop();
         cluster.Execute("postgres", $"CREATE ROLE pos_app LOGIN PASSWORD '{appPassword}' NOSUPERUSER NOCREATEDB NOCREATEROLE;");
+        // The dedicated platform role (doc 16 §4): bypasses RLS, owns nothing, exact grants per database.
+        cluster.Execute("postgres", $"CREATE ROLE pos_platform LOGIN PASSWORD '{platformPassword}' BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;");
         return cluster;
     }
 
@@ -93,6 +99,13 @@ public sealed class PostgresCluster
 
     public string AppConnection(string database) =>
         $"Host=127.0.0.1;Port={Port};Username=pos_app;Password={AppPassword};Database={database};Timeout=15";
+
+    public string PlatformConnection(string database) =>
+        $"Host=127.0.0.1;Port={Port};Username=pos_platform;Password={PlatformPassword};Database={database};Timeout=15";
+
+    /// <summary>After migrations: the platform role gets exactly the grants printed by « Pos.Cloud platform-grants ».</summary>
+    public void GrantPlatform(string database, string grants) =>
+        Execute(database, $"GRANT CONNECT ON DATABASE {database} TO pos_platform;\n" + grants);
 
     public string CreateDatabase()
     {
@@ -189,6 +202,7 @@ public sealed partial class CloudProcess : IAsyncDisposable
         Port = PostgresCluster.FreePort();
         Admin("migrate");
         PostgresCluster.Instance.GrantApp(Database);
+        PostgresCluster.Instance.GrantPlatform(Database, Admin("platform-grants", "--role", "pos_platform"));
         Fingerprint = Value(Admin("dev-cert", "--out", CertificatePath), "sha256");
     }
 
@@ -442,6 +456,7 @@ public sealed partial class CloudProcess : IAsyncDisposable
 
         info.Environment["POS_CLOUD_DB"] = PostgresCluster.Instance.AppConnection(Database);
         info.Environment["POS_CLOUD_MIGRATION_DB"] = PostgresCluster.Instance.AdminConnection(Database);
+        info.Environment["POS_CLOUD_ADMIN_DB"] = PostgresCluster.Instance.PlatformConnection(Database);
         info.Environment["POS_CLOUD_CERT_PASSWORD"] = _certificatePassword;
         info.Environment["POS_CLOUD_PUBLIC_ORIGIN"] = PublicOrigin;
         info.Environment["POS_CLOUD_MAIL_DIR"] = MailDirectory;

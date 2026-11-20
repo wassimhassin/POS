@@ -16,6 +16,11 @@ public sealed class Organization
     public Guid Id { get; set; }
     public string Name { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>Optimistic concurrency for management updates (expectedVersion); starts at 1.</summary>
+    public int Version { get; set; } = 1;
+
+    public DateTimeOffset? UpdatedAt { get; set; }
 }
 
 public sealed class Business
@@ -24,6 +29,11 @@ public sealed class Business
     public Guid Id { get; set; }
     public string Name { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>Optimistic concurrency for management updates (expectedVersion); starts at 1.</summary>
+    public int Version { get; set; } = 1;
+
+    public DateTimeOffset? UpdatedAt { get; set; }
 }
 
 public sealed class Branch
@@ -33,6 +43,11 @@ public sealed class Branch
     public Guid Id { get; set; }
     public string Name { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>Optimistic concurrency for management updates (expectedVersion); starts at 1.</summary>
+    public int Version { get; set; } = 1;
+
+    public DateTimeOffset? UpdatedAt { get; set; }
 }
 
 /// <summary>A registered branch gateway: its ECDSA P-256 public key. No shared secret is stored.</summary>

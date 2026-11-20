@@ -29,11 +29,11 @@ that is in neither list, so a new table cannot ship unclassified.
 |---|---|---|
 | Gateway sync (`POST /v1/sync/events`, `GET /v1/sync/state`, `GET /v1/sync/events`) | The verified gateway credential | `app_gateway_credential(id)`, used to verify the signature |
 | Gateway registration | The provisioning code | `app_provisioning_code_organization(hash)`; `app_gateway_key_registered(fingerprint)` (keys are unique across all tenants; it answers yes/no only) |
-| Reports | The verified report key | `app_report_key(id)` |
-| Organization API (doc 14) | The caller's verified membership (never the path alone) | `app_user_memberships(session user)` |
+| Reports | The verified report key | `app_report_key(id, secret hash)` (2.1F: answers only for the matching secret) |
+| Organization API (docs 14, 16) | The caller's verified membership (never the path alone) | `app_session_memberships(session, user)` (2.1F: a live session of that user) |
 | Invitation acceptance | The invitation token | `app_invitation_organization(token hash)` |
 | Owner onboarding | The server-side onboarding token row | none |
-| `/v1/me`, MFA gate | none (account-level) | `app_user_memberships(session user)` |
+| `/v1/me`, MFA gate | none (account-level) | `app_session_memberships(session, user)` |
 | Hourly cleanup | none (all tenants) | `app_purge_expired_invitations(cutoff, limit)` (delete-only, at most 1000 per call) |
 | Platform CLI (provisioning) | none: privileged role (§4) | n/a |
 
@@ -71,8 +71,8 @@ every one of the nine functions from `PUBLIC`; the deploy step grants it to the 
 
 | Role | Variable | Used by | RLS |
 |---|---|---|---|
-| Schema owner | `POS_CLOUD_MIGRATION_DB` | `migrate`, `audit-prune` (and platform commands if `POS_CLOUD_ADMIN_DB` is unset) | Exempt as table owner (RLS is not FORCEd, so migrations and the definer functions work) |
-| Platform operator (recommended: dedicated role) | `POS_CLOUD_ADMIN_DB` | `org-create`, `business-create`, `branch-create`, `gateway-code`, `gateways`, `gateway-revoke`, `report-key`, `owner-invite` | Must be exempt: the command checks for superuser, BYPASSRLS or ownership and refuses otherwise |
+| Schema owner | `POS_CLOUD_MIGRATION_DB` | `migrate`, `audit-prune` (never platform commands since 2.1F) | Exempt as table owner (RLS is not FORCEd, so migrations and the definer functions work) |
+| Platform role `pos_platform` (required since 2.1F) | `POS_CLOUD_ADMIN_DB` | `org-create`, `business-create`, `branch-create`, `gateway-code`, `gateways`, `gateway-revoke`, `report-key`, `owner-invite` | BYPASSRLS, not owner or superuser, exact grants ([doc 16 §4](16-CLOUD-STRUCTURE-MANAGEMENT.md)); verified by every command |
 | Runtime `pos_app` | `POS_CLOUD_DB` | The service, `cleanup`, `mfa-rekey`, `check-config` | Fully subject: not superuser, no BYPASSRLS, owns nothing |
 
 `run` and `check-config` refuse a runtime connection whose user equals the migration or admin user.
@@ -98,16 +98,9 @@ REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app;     -- new in 2.1E
 ```
 
-Optional, but recommended in production, is a dedicated platform role (created by a superuser) instead of using the
-schema owner for provisioning:
-
-```sql
-CREATE ROLE pos_platform LOGIN PASSWORD '…' BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
-GRANT USAGE ON SCHEMA public TO pos_platform;
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO pos_platform;
-REVOKE UPDATE ON auth_audit_events FROM pos_platform;
--- then POS_CLOUD_ADMIN_DB = connection string of pos_platform
-```
+Since Phase 2.1F the dedicated platform role is **required**, with exactly the grants printed by
+`Pos.Cloud platform-grants --role pos_platform` (doc 16 §4). The broader grants this section described in 2.1E are now
+refused: run `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM pos_platform;` before applying the printed ones.
 
 Then run `Pos.Cloud check-config …` as the runtime role. Exit 0 means ready. In addition to the earlier checks, it now
 verifies:
@@ -127,7 +120,7 @@ verifies:
 | "ni d'organisation ni de compte : T" | A new table without classification | Add it to `Tenancy.TenantTables` (with a policy in a migration) or to `AccountTables` |
 | "le rôle applicatif possède …" / "BYPASSRLS" | The runtime role owns a table or bypasses RLS | `ALTER TABLE … OWNER TO <schema owner>` then re-run §5 (ownership transfer drops the role's explicit grants); `ALTER ROLE pos_app NOBYPASSRLS` |
 | "contexte d'organisation est prédéfini" | `ALTER ROLE/DATABASE … SET app.organization_id` | `ALTER ROLE pos_app RESET app.organization_id` / `ALTER DATABASE … RESET app.organization_id` |
-| Platform command: "opération de plateforme refusée" | `POS_CLOUD_ADMIN_DB` points to the runtime role | Use the owner or a BYPASSRLS platform role (§5) |
+| Platform command: "opération de plateforme refusée" | `POS_CLOUD_ADMIN_DB` unset, the runtime or owner role, or wrong grants | Use the dedicated platform role with the `platform-grants` output (doc 16 §4) |
 | Emergency rollback | A defect in the policies | `Pos.Cloud migrate` cannot go down by itself. As the owner, apply the migration's Down script (it disables RLS and drops the functions), deploy the previous build, and keep application-level isolation as the only layer meanwhile |
 
 ## 7. Tests (`RowLevelSecurityTests`, plus all existing suites)
@@ -152,8 +145,9 @@ verifies:
    nor against SQL injection, which could do the same. The context is set in one place (`BeginTenantAsync`) from
    authenticated principals only.
 2. **The pre-tenant lookups are callable by the runtime role for any id.**
-   - `app_user_memberships` lists the memberships of any user id.
-   - `app_report_key` returns a key's SHA-256 secret hash (the secret itself is 256 bits, so the hash cannot be
+   - (Narrowed in 2.1F, doc 16 §5.) In 2.1E, `app_user_memberships` listed the memberships of any user id; it now
+     needs a live session of that user.
+   - In 2.1E, `app_report_key` returned a key's SHA-256 secret hash (2.1F: it needs the hash and returns none) (the secret itself is 256 bits, so the hash cannot be
      inverted).
    - `app_gateway_credential` returns a public key.
 

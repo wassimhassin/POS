@@ -39,6 +39,9 @@ public static class AuthApi
     public const string AuthRateLimit = "auth";
     public const string MailRateLimit = "auth-mail";
 
+    /// <summary>Structure management mutations (doc 16): per IP, separate from the sign-in budget.</summary>
+    public const string ManageRateLimit = "manage";
+
     public static void AddPolicies(AuthorizationBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);

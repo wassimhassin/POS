@@ -196,6 +196,8 @@ $cloud = "apps\cloud-api\Pos.Cloud\bin\Debug\net10.0\Pos.Cloud.exe"
 & $cloud migrate                     # then GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES ... TO pos_app
                                      # and REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app
                                      # and GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app (doc 15)
+                                     # and: & $cloud platform-grants --role pos_platform | psql <owner> (doc 16)
+                                     # platform commands below need $env:POS_CLOUD_ADMIN_DB = <pos_platform connection>
 & $cloud dev-cert --out cloud.pfx --host 127.0.0.1          # prints sha256=<pin>
 & $cloud org-create --name "Groupe"                          # organization_id=...
 & $cloud business-create --org <org> --name "Café"           # business_id=...
