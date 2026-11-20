@@ -89,6 +89,7 @@ public static class CloudApi
 
         // Cloud users (sessions); separate from the gateway and report-key schemes.
         AuthApi.Map(v1);
+        MembershipApi.Map(v1); // organization access (roles, scopes, memberships): deny by default
 
         var reports = v1.MapGroup("/reports").RequireAuthorization(ReportPolicy).WithTags("Reports").ProducesErrors(404);
 

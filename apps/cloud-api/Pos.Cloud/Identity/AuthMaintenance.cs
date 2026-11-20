@@ -102,6 +102,9 @@ public static class AuthRetention
     /// <summary>Expired or consumed single-use tokens (hashes only) are kept this long after expiry.</summary>
     public static readonly TimeSpan Tokens = TimeSpan.FromDays(7);
 
+    /// <summary>Membership invitations (they hold an address) are deleted this long after they expired.</summary>
+    public static readonly TimeSpan Invitations = TimeSpan.FromDays(30);
+
     /// <summary>A TOTP setup never confirmed is abandoned after this long (it holds a secret for nothing).</summary>
     public static readonly TimeSpan AbandonedMfaSetup = TimeSpan.FromDays(1);
 
@@ -114,7 +117,7 @@ public static class AuthRetention
 
     public const int MaxBatchesPerRun = 50;
 
-    public sealed record CleanupResult(int Sessions, int Tokens, int AbandonedMfa, bool Complete);
+    public sealed record CleanupResult(int Sessions, int Tokens, int AbandonedMfa, bool Complete, int Invitations = 0);
 
     public static async Task<CleanupResult> CleanupAsync(CloudDb db, DateTimeOffset now, CancellationToken ct)
     {
@@ -122,7 +125,8 @@ public static class AuthRetention
         var sessionCutoff = now - EndedSessions;
         var tokenCutoff = now - Tokens;
         var mfaCutoff = now - AbandonedMfaSetup;
-        int sessions = 0, tokens = 0, mfa = 0, batches = 0;
+        var invitationCutoff = now - Invitations;
+        int sessions = 0, tokens = 0, mfa = 0, invitations = 0, batches = 0;
         int deleted;
         do
         {
@@ -156,7 +160,18 @@ public static class AuthRetention
         }
         while (deleted == BatchSize && ++batches < MaxBatchesPerRun);
 
-        return new CleanupResult(sessions, tokens, mfa, batches < MaxBatchesPerRun);
+        do
+        {
+            // Accepted or revoked invitations expire within 72 h of creation, so expiry bounds every state.
+            deleted = await db.Database.ExecuteSqlAsync($"""
+                DELETE FROM membership_invitations WHERE id IN (
+                    SELECT id FROM membership_invitations WHERE expires_at < {invitationCutoff} LIMIT {BatchSize})
+                """, ct);
+            invitations += deleted;
+        }
+        while (deleted == BatchSize && ++batches < MaxBatchesPerRun);
+
+        return new CleanupResult(sessions, tokens, mfa, batches < MaxBatchesPerRun, invitations);
     }
 
     /// <summary>Operator command with the owner role: deletes audit rows older than <paramref name="days"/> (≥ 365), in batches.</summary>
@@ -201,7 +216,7 @@ public sealed partial class AuthMaintenance(IServiceScopeFactory scopes, TimePro
                 {
                     await using var scope = scopes.CreateAsyncScope();
                     var result = await AuthRetention.CleanupAsync(scope.ServiceProvider.GetRequiredService<CloudDb>(), time.GetUtcNow(), stoppingToken);
-                    LogCleanup(logger, result.Sessions, result.Tokens, result.AbandonedMfa, result.Complete);
+                    LogCleanup(logger, result.Sessions, result.Tokens, result.AbandonedMfa, result.Invitations, result.Complete);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -216,8 +231,8 @@ public sealed partial class AuthMaintenance(IServiceScopeFactory scopes, TimePro
         }
     }
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Auth cleanup: {Sessions} ended sessions, {Tokens} expired tokens, {Mfa} abandoned MFA setups removed (complete: {Complete})")]
-    private static partial void LogCleanup(ILogger logger, int sessions, int tokens, int mfa, bool complete);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Auth cleanup: {Sessions} ended sessions, {Tokens} expired tokens, {Mfa} abandoned MFA setups, {Invitations} old invitations removed (complete: {Complete})")]
+    private static partial void LogCleanup(ILogger logger, int sessions, int tokens, int mfa, int invitations, bool complete);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Auth cleanup failed ({Failure}); retrying at the next interval")]
     private static partial void LogFailed(ILogger logger, string failure);

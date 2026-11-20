@@ -178,6 +178,7 @@ public sealed class CloudDb(DbContextOptions<CloudDb> options) : IdentityUserCon
     public DbSet<UserMfa> UserMfa => Set<UserMfa>();
     public DbSet<RecoveryCode> RecoveryCodes => Set<RecoveryCode>();
     public DbSet<OrganizationMembership> OrganizationMemberships => Set<OrganizationMembership>();
+    public DbSet<MembershipInvitation> MembershipInvitations => Set<MembershipInvitation>();
     public DbSet<AuthAuditEvent> AuthAuditEvents => Set<AuthAuditEvent>();
 
     protected override void OnModelCreating(ModelBuilder builder)

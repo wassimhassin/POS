@@ -164,7 +164,8 @@ public static class AuthApi
         ArgumentNullException.ThrowIfNull(next);
         ArgumentNullException.ThrowIfNull(settings);
         var path = http.Request.Path;
-        if (path.StartsWithSegments("/v1/auth", StringComparison.Ordinal) || path.StartsWithSegments("/v1/me", StringComparison.Ordinal))
+        if (path.StartsWithSegments("/v1/auth", StringComparison.Ordinal) || path.StartsWithSegments("/v1/me", StringComparison.Ordinal)
+            || path.StartsWithSegments("/v1/organizations", StringComparison.Ordinal) || path.StartsWithSegments("/v1/invitations", StringComparison.Ordinal))
         {
             http.Response.Headers.CacheControl = "no-store";
             http.Response.Headers.Pragma = "no-cache";

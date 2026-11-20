@@ -495,6 +495,11 @@ namespace Pos.Cloud.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<string>("Details")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("details");
+
                     b.Property<string>("Event")
                         .IsRequired()
                         .HasMaxLength(40)
@@ -518,6 +523,10 @@ namespace Pos.Cloud.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("session_id");
 
+                    b.Property<Guid?>("TargetUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("target_user_id");
+
                     b.Property<string>("UserAgent")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)")
@@ -532,6 +541,9 @@ namespace Pos.Cloud.Migrations
 
                     b.HasIndex("OccurredAt")
                         .HasDatabaseName("ix_auth_audit_events_occurred_at");
+
+                    b.HasIndex("OrganizationId", "OccurredAt")
+                        .HasDatabaseName("ix_auth_audit_events_organization_id_occurred_at");
 
                     b.HasIndex("UserId", "OccurredAt")
                         .HasDatabaseName("ix_auth_audit_events_user_id_occurred_at");
@@ -682,6 +694,95 @@ namespace Pos.Cloud.Migrations
                     b.ToTable("users", (string)null);
                 });
 
+            modelBuilder.Entity("Pos.Cloud.Identity.MembershipInvitation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("accepted_at");
+
+                    b.Property<Guid?>("AcceptedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("accepted_by");
+
+                    b.Property<Guid?>("BranchId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("branch_id");
+
+                    b.Property<Guid?>("BusinessId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("business_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<Guid>("InvitedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("invited_by");
+
+                    b.Property<string>("NormalizedEmail")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("normalized_email");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("organization_id");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("role");
+
+                    b.Property<byte[]>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("token_hash");
+
+                    b.HasKey("Id")
+                        .HasName("pk_membership_invitations");
+
+                    b.HasIndex("ExpiresAt")
+                        .HasDatabaseName("ix_membership_invitations_expires_at");
+
+                    b.HasIndex("InvitedBy")
+                        .HasDatabaseName("ix_membership_invitations_invited_by");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_membership_invitations_token_hash");
+
+                    b.HasIndex("OrganizationId", "NormalizedEmail")
+                        .HasDatabaseName("ix_membership_invitations_organization_id_normalized_email");
+
+                    b.HasIndex("OrganizationId", "BusinessId", "BranchId")
+                        .HasDatabaseName("ix_membership_invitations_organization_id_business_id_branch_id");
+
+                    b.ToTable("membership_invitations", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_membership_invitations_org_wide_roles", "role NOT IN ('owner', 'admin') OR business_id IS NULL");
+
+                            t.HasCheckConstraint("ck_membership_invitations_role", "role IN ('owner', 'admin', 'manager', 'viewer')");
+
+                            t.HasCheckConstraint("ck_membership_invitations_scope", "branch_id IS NULL OR business_id IS NOT NULL");
+                        });
+                });
+
             modelBuilder.Entity("Pos.Cloud.Identity.OrganizationMembership", b =>
                 {
                     b.Property<Guid>("OrganizationId")
@@ -691,6 +792,14 @@ namespace Pos.Cloud.Migrations
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid")
                         .HasColumnName("user_id");
+
+                    b.Property<Guid?>("BranchId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("branch_id");
+
+                    b.Property<Guid?>("BusinessId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("business_id");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -706,15 +815,30 @@ namespace Pos.Cloud.Migrations
                         .HasColumnType("character varying(20)")
                         .HasColumnName("role");
 
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<int>("Version")
+                        .HasColumnType("integer")
+                        .HasColumnName("version");
+
                     b.HasKey("OrganizationId", "UserId")
                         .HasName("pk_organization_memberships");
 
                     b.HasIndex("UserId")
                         .HasDatabaseName("ix_organization_memberships_user_id");
 
+                    b.HasIndex("OrganizationId", "BusinessId", "BranchId")
+                        .HasDatabaseName("ix_organization_memberships_organization_id_business_id_branch~");
+
                     b.ToTable("organization_memberships", null, t =>
                         {
-                            t.HasCheckConstraint("ck_organization_memberships_role", "role IN ('owner')");
+                            t.HasCheckConstraint("ck_organization_memberships_org_wide_roles", "role NOT IN ('owner', 'admin') OR business_id IS NULL");
+
+                            t.HasCheckConstraint("ck_organization_memberships_role", "role IN ('owner', 'admin', 'manager', 'viewer')");
+
+                            t.HasCheckConstraint("ck_organization_memberships_scope", "branch_id IS NULL OR business_id IS NOT NULL");
                         });
                 });
 
@@ -1192,6 +1316,37 @@ namespace Pos.Cloud.Migrations
                         .HasConstraintName("fk_auth_tokens_users_user_id");
                 });
 
+            modelBuilder.Entity("Pos.Cloud.Identity.MembershipInvitation", b =>
+                {
+                    b.HasOne("Pos.Cloud.Identity.CloudUser", null)
+                        .WithMany()
+                        .HasForeignKey("InvitedBy")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_membership_invitations_users_invited_by");
+
+                    b.HasOne("Pos.Cloud.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_membership_invitations_organizations_organization_id");
+
+                    b.HasOne("Pos.Cloud.Business", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "BusinessId")
+                        .HasPrincipalKey("OrganizationId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_membership_invitations_businesses_organization_id_business_~");
+
+                    b.HasOne("Pos.Cloud.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "BusinessId", "BranchId")
+                        .HasPrincipalKey("OrganizationId", "BusinessId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_membership_invitations_branches_organization_id_business_id~");
+                });
+
             modelBuilder.Entity("Pos.Cloud.Identity.OrganizationMembership", b =>
                 {
                     b.HasOne("Pos.Cloud.Organization", null)
@@ -1207,6 +1362,20 @@ namespace Pos.Cloud.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_organization_memberships_users_user_id");
+
+                    b.HasOne("Pos.Cloud.Business", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "BusinessId")
+                        .HasPrincipalKey("OrganizationId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_organization_memberships_businesses_organization_id_busines~");
+
+                    b.HasOne("Pos.Cloud.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "BusinessId", "BranchId")
+                        .HasPrincipalKey("OrganizationId", "BusinessId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_organization_memberships_branches_organization_id_business_~");
                 });
 
             modelBuilder.Entity("Pos.Cloud.Identity.RecoveryCode", b =>

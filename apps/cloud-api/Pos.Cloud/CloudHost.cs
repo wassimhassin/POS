@@ -69,6 +69,8 @@ internal static class CloudHost
         }
         builder.Services.AddScoped<SessionService>();
         builder.Services.AddScoped<AuthService>();
+        builder.Services.AddScoped<OrganizationAccess>();
+        builder.Services.AddScoped<MembershipService>();
         builder.Services.AddIdentityCore<CloudUser>(o =>
             {
                 // Length over composition rules (NIST SP 800-63B); upper bound in AuthService (hashing cost).

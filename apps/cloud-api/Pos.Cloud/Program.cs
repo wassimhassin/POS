@@ -224,6 +224,7 @@ try
             Console.WriteLine($"sessions={result.Sessions}");
             Console.WriteLine($"tokens={result.Tokens}");
             Console.WriteLine($"abandoned_mfa={result.AbandonedMfa}");
+            Console.WriteLine($"invitations={result.Invitations}");
             Console.WriteLine($"complete={(result.Complete ? 1 : 0)}");
             return 0;
         }
@@ -350,6 +351,17 @@ static async Task<int> CheckConfigAsync(Cli options, ILogger log)
         if (auditWritable)
         {
             errors.Add($"{CloudSettings.RuntimeDb} : le rôle applicatif ne doit pas pouvoir modifier ni supprimer le journal de sécurité (REVOKE UPDATE, DELETE ON auth_audit_events).");
+        }
+
+        // Every application table must be usable by the service (new tables need the deploy-time GRANT again).
+        var unusable = await db.Database.SqlQueryRaw<string>(
+            "SELECT c.relname AS \"Value\" FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+            "WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> '__EFMigrationsHistory' " +
+            "AND NOT (has_table_privilege(current_user, c.oid, 'SELECT') AND has_table_privilege(current_user, c.oid, 'INSERT')) ORDER BY 1")
+            .ToListAsync();
+        if (unusable.Count > 0)
+        {
+            errors.Add($"{CloudSettings.RuntimeDb} : le rôle applicatif ne peut pas lire/écrire {string.Join(", ", unusable)} (GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, puis REVOKE UPDATE, DELETE ON auth_audit_events).");
         }
 
         if (pending.Count == 0)

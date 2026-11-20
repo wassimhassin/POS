@@ -54,6 +54,9 @@ public sealed partial class UserClient : IDisposable
         return Http.SendAsync(request);
     }
 
+    public Task<HttpResponseMessage> PatchAsync(string path, object body) =>
+        Http.SendAsync(new HttpRequestMessage(HttpMethod.Patch, path) { Content = JsonContent.Create(body, body.GetType(), options: SyncProtocol.Json) });
+
     public Task<HttpResponseMessage> GetAsync(string path) => Http.GetAsync(path);
 
     public Task<HttpResponseMessage> DeleteAsync(string path) => Http.DeleteAsync(path);

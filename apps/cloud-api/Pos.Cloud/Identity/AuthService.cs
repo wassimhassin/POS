@@ -555,8 +555,13 @@ public sealed partial class AuthService(
         }
         else
         {
+            // Re-activated or promoted: an owner is organization-wide; the version tells clients it changed.
             existing.RevokedAt = null;
             existing.Role = MembershipRoles.Owner;
+            existing.BusinessId = null;
+            existing.BranchId = null;
+            existing.UpdatedAt = time.GetUtcNow();
+            existing.Version++;
         }
 
         await db.SaveChangesAsync(ct);
@@ -747,18 +752,7 @@ public sealed partial class AuthService(
 
     private async Task AuditAsync(string auditEvent, HttpContext? http, Guid? userId, Guid? sessionId = null, Guid? organizationId = null, CancellationToken ct = default)
     {
-        var agent = http?.Request.Headers.UserAgent.ToString();
-        db.AuthAuditEvents.Add(new AuthAuditEvent
-        {
-            Id = Guid.CreateVersion7(),
-            OccurredAt = time.GetUtcNow(),
-            Event = auditEvent,
-            UserId = userId,
-            OrganizationId = organizationId,
-            SessionId = sessionId,
-            IpAddress = http?.Connection.RemoteIpAddress?.ToString(),
-            UserAgent = string.IsNullOrEmpty(agent) ? null : agent.Length <= 200 ? agent : agent[..200],
-        });
+        AuthAudit.Add(db, time, auditEvent, http, userId, sessionId, organizationId);
         await db.SaveChangesAsync(ct);
     }
 
@@ -785,7 +779,7 @@ public sealed partial class AuthService(
         }
     }
 
-    private static string ValidEmail(string? email) =>
+    internal static string ValidEmail(string? email) =>
         TryEmail(email) ?? throw new CloudException(400, AuthErrors.InvalidEmail, "Adresse e-mail invalide.");
 
     private static string? TryEmail(string? email)

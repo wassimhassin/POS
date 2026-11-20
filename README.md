@@ -335,3 +335,20 @@ See [docs/12-CLOUD-AUTHENTICATION.md](docs/12-CLOUD-AUTHENTICATION.md) for the a
 - **New required setting:** `POS_CLOUD_DATA_KEYS`.
 
 See [docs/13-SECURITY-RELIABILITY-HARDENING.md](docs/13-SECURITY-RELIABILITY-HARDENING.md).
+
+## Cloud access control (Phase 2.1D)
+
+- **Roles:** Owner, Admin, Manager and Viewer, mapped to a permission catalog (`organization.read`, `members.read`,
+  `members.invite`, `members.manage`).
+- **Scopes:** organization-wide, business or branch, kept inside the organization by the database.
+- **Membership API** under `/v1/organizations/{id}`: access, branches, members (list, change, revoke) and invitations
+  (list, invite, cancel); `POST /v1/invitations/accept`.
+- **Enforcement:**
+  - Deny by default, evaluated from the database on every request. A non-member gets 404 and a missing permission
+    gets 403.
+  - Nobody can grant or act on a role at or above their own (owners excepted).
+  - The last owner is protected.
+  - Every change ends the affected user's sessions.
+- **Audit:** every access change is recorded with actor, target and ids, never addresses or tokens.
+
+See [docs/14-CLOUD-ACCESS-CONTROL.md](docs/14-CLOUD-ACCESS-CONTROL.md).

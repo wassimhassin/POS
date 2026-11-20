@@ -154,7 +154,7 @@ public sealed class ApiFoundationTests : IAsyncLifetime
             var operations = document["paths"]!.AsObject()
                 .SelectMany(p => p.Value!.AsObject().Select(o => (Path: p.Key, Method: o.Key, Operation: o.Value!)))
                 .ToList();
-            Assert.Equal(27, operations.Count);
+            Assert.Equal(36, operations.Count);
             Assert.All(operations, o => Assert.StartsWith("/v1/", o.Path, StringComparison.Ordinal));
             Assert.All(operations, o => Assert.NotNull(o.Operation["responses"]!["401"]));
             foreach (var (opPath, method, operation) in operations)
@@ -163,7 +163,8 @@ public sealed class ApiFoundationTests : IAsyncLifetime
                 string[] anonymous = ["/v1/gateways/register", "/v1/auth/register", "/v1/auth/verify-email", "/v1/auth/resend-verification", "/v1/auth/login", "/v1/auth/password/forgot", "/v1/auth/password/reset"];
                 string[] expected = anonymous.Contains(opPath) ? []
                     : opPath.StartsWith("/v1/reports/", StringComparison.Ordinal) ? ["ReportKey"]
-                    : opPath.StartsWith("/v1/auth/", StringComparison.Ordinal) || opPath.StartsWith("/v1/me", StringComparison.Ordinal) ? ["Session"]
+                    : opPath.StartsWith("/v1/auth/", StringComparison.Ordinal) || opPath.StartsWith("/v1/me", StringComparison.Ordinal)
+                        || opPath.StartsWith("/v1/organizations/", StringComparison.Ordinal) || opPath.StartsWith("/v1/invitations/", StringComparison.Ordinal) ? ["Session"]
                     : ["PosGateway"];
                 Assert.True(expected.SequenceEqual(schemes), $"{method} {opPath}: [{string.Join(',', schemes)}]");
             }
