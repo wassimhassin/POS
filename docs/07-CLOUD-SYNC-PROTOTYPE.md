@@ -190,7 +190,8 @@ $env:POS_CLOUD_MIGRATION_DB = "Host=...;Username=owner;Password=...;Database=pos
 $env:POS_CLOUD_DB           = "Host=...;Username=pos_app;Password=...;Database=pos_cloud"   # DML only
 $env:POS_CLOUD_CERT_PASSWORD = "<12+ chars>"
 $env:POS_CLOUD_PUBLIC_ORIGIN = "https://dashboard.example.tn"   # links in account emails (doc 12)
-$env:POS_CLOUD_MAIL_DIR      = "C:posmail"                    # existing folder: account emails land here as .eml
+$env:POS_CLOUD_MAIL_DIR      = "C:posmail"                    # existing folder: account emails land here as .eml (or POS_CLOUD_SMTP_HOST, doc 13)
+$env:POS_CLOUD_DATA_KEYS     = "<output of Pos.Cloud data-key-new, after data_key=>"   # encrypts MFA secrets at rest
 $cloud = "apps\cloud-api\Pos.Cloud\bin\Debug\net10.0\Pos.Cloud.exe"
 & $cloud migrate                     # then GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES ... TO pos_app
                                      # and REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app

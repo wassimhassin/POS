@@ -20,7 +20,8 @@ public sealed record CloudLink(
     string? BusinessName,
     byte[]? ProtectedPrivateKey,
     string RequestedAt,
-    string? LinkedAt)
+    string? LinkedAt,
+    byte[]? PendingProtectedKey = null)
 {
     public bool IsLinked => GatewayId is not null;
 }
@@ -149,7 +150,7 @@ public sealed partial class GatewayStore
         using var connection = Database.OpenConnection();
         using var query = Command(connection, null, """
             SELECT cloud_url, cloud_pin, pending_code, gateway_id, organization_id, organization_name, business_id, business_name,
-                   private_key, requested_at, linked_at
+                   private_key, requested_at, linked_at, pending_private_key
             FROM cloud_link WHERE id = 1;
             """);
         using var reader = query.ExecuteReader();
@@ -160,7 +161,8 @@ public sealed partial class GatewayStore
 
         string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
         return new CloudLink(reader.GetString(0), Text(1), Text(2), Text(3), Text(4), Text(5), Text(6), Text(7),
-            reader.IsDBNull(8) ? null : (byte[])reader.GetValue(8), reader.GetString(9), Text(10));
+            reader.IsDBNull(8) ? null : (byte[])reader.GetValue(8), reader.GetString(9), Text(10),
+            reader.IsDBNull(11) ? null : (byte[])reader.GetValue(11));
     }
 
     /// <summary>
@@ -194,7 +196,7 @@ public sealed partial class GatewayStore
         using var connection = Database.OpenConnection();
         using var upsert = Command(connection, null, """
             INSERT INTO cloud_link (id, cloud_url, cloud_pin, pending_code, requested_at) VALUES (1, $url, $pin, $code, $now)
-            ON CONFLICT (id) DO UPDATE SET cloud_url = $url, cloud_pin = $pin, pending_code = $code, requested_at = $now;
+            ON CONFLICT (id) DO UPDATE SET cloud_url = $url, cloud_pin = $pin, pending_code = $code, pending_private_key = NULL, requested_at = $now;
             UPDATE sync_state SET last_error = NULL, consecutive_failures = 0 WHERE id = 1;
             """);
         upsert.Parameters.AddWithValue("$url", uri.GetLeftPart(UriPartial.Authority) + "/");
@@ -210,7 +212,7 @@ public sealed partial class GatewayStore
         var protectedKey = ProtectedData.Protect(privateKeyPkcs8, CloudKeyEntropy, DataProtectionScope.CurrentUser);
         using var connection = Database.OpenConnection();
         using var update = Command(connection, null, """
-            UPDATE cloud_link SET pending_code = NULL, gateway_id = $gateway, organization_id = $org, organization_name = $orgName,
+            UPDATE cloud_link SET pending_code = NULL, pending_private_key = NULL, gateway_id = $gateway, organization_id = $org, organization_name = $orgName,
                 business_id = $business, business_name = $businessName, private_key = $key, linked_at = $now
             WHERE id = 1;
             """);
@@ -226,9 +228,46 @@ public sealed partial class GatewayStore
             registration.GatewayId, registration.OrganizationId, registration.BusinessId, registration.BranchId);
     }
 
-    internal static ECDsa LoadCloudKey(CloudLink link)
+    /// <summary>
+    /// The key this gateway registers with for the current provisioning code: created and stored (DPAPI) before the
+    /// first attempt, then reused by every retry, so a lost reply never turns into a second identity.
+    /// </summary>
+    internal ECDsa PendingCloudKey(CloudLink link)
     {
-        var pkcs8 = ProtectedData.Unprotect(link.ProtectedPrivateKey!, CloudKeyEntropy, DataProtectionScope.CurrentUser);
+        ArgumentNullException.ThrowIfNull(link);
+        if (link.PendingProtectedKey is { } stored)
+        {
+            return ImportProtected(stored);
+        }
+
+        var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var pkcs8 = key.ExportPkcs8PrivateKey();
+        try
+        {
+            using var connection = Database.OpenConnection();
+            using var update = Command(connection, null,
+                "UPDATE cloud_link SET pending_private_key = $key WHERE id = 1 AND pending_code = $code AND pending_private_key IS NULL;");
+            update.Parameters.AddWithValue("$key", ProtectedData.Protect(pkcs8, CloudKeyEntropy, DataProtectionScope.CurrentUser));
+            update.Parameters.AddWithValue("$code", link.PendingCode);
+            if (update.ExecuteNonQuery() != 1)
+            {
+                key.Dispose();
+                throw new SyncFailureException("Demande de liaison modifiée pendant l'enregistrement ; nouvel essai.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+        }
+
+        return key;
+    }
+
+    internal static ECDsa LoadCloudKey(CloudLink link) => ImportProtected(link.ProtectedPrivateKey!);
+
+    private static ECDsa ImportProtected(byte[] protectedKey)
+    {
+        var pkcs8 = ProtectedData.Unprotect(protectedKey, CloudKeyEntropy, DataProtectionScope.CurrentUser);
         try
         {
             var key = ECDsa.Create();

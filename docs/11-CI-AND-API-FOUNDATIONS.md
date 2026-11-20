@@ -153,6 +153,7 @@ That makes it suitable as a deploy/readiness step.
 | Certificate | Expires in < 30 days | Warning |
 | Database (`check-config` only) | Reachable as the runtime role; no pending migration; role is neither superuser nor allowed `CREATE` on `public` | Error |
 | `POS_CLOUD_PUBLIC_ORIGIN`, `POS_CLOUD_MAIL_DIR` (2.1B) | https origin without path; existing writable absolute directory | Error |
+| `POS_CLOUD_SMTP_*`, `POS_CLOUD_MAIL_FROM`, `POS_CLOUD_DATA_KEYS` (2.1C) | Exactly one mail transport; SMTP rules in doc 13 §4; at least one valid data key | Error (values never echoed) |
 | Database (`check-config`, 2.1B) | Runtime role has no `UPDATE`/`DELETE` on `auth_audit_events` | Error |
 
 Messages name the setting at fault and **never its value**. Parser and driver messages, which can quote a connection

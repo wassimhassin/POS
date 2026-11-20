@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 namespace Pos.Cloud.Identity;
 
 /// <summary>Settings of the user-authentication module (validated at startup by <see cref="CloudSettings"/>).</summary>
-public sealed record AuthSettings(string PublicOrigin, string MailDirectory);
+public sealed record AuthSettings(string PublicOrigin, MailSettings Mail, SecretKeyRing Keys);
 
 /// <summary>Error codes of the authentication API (in addition to the generic envelope codes).</summary>
 public static class AuthErrors
@@ -77,6 +77,7 @@ public sealed partial class AuthService(
     SessionService sessions,
     IAuthMailer mailer,
     AuthSettings settings,
+    SecretKeyRing keys,
     TimeProvider time,
     ILogger<AuthService> logger)
 {
@@ -353,18 +354,18 @@ public sealed partial class AuthService(
         var secret = AuthSecrets.NewTotpSecret();
         if (mfa is null)
         {
-            db.UserMfa.Add(new UserMfa { UserId = user.Id, TotpSecret = secret, CreatedAt = time.GetUtcNow() });
-        }
-        else
-        {
-            mfa.TotpSecret = secret;
-            mfa.CreatedAt = time.GetUtcNow();
-            mfa.LastUsedStep = 0;
+            mfa = new UserMfa { UserId = user.Id };
+            db.UserMfa.Add(mfa);
         }
 
+        MfaSecrets.Seal(keys, mfa, secret); // encrypted at rest; shown to the user once, below
+        mfa.CreatedAt = time.GetUtcNow();
+        mfa.LastUsedStep = 0;
         await db.SaveChangesAsync(ct);
         await AuditAsync(AuthEvents.MfaSetupStarted, http, user.Id, principal.SessionId, ct: ct);
-        return new TotpSetup(AuthSecrets.Base32(secret), AuthSecrets.OtpAuthUri("PosSaaS", user.Email!, secret));
+        var setup = new TotpSetup(AuthSecrets.Base32(secret), AuthSecrets.OtpAuthUri("PosSaaS", user.Email!, secret));
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+        return setup;
     }
 
     /// <summary>Enables TOTP with a first valid code, issues recovery codes, ends other sessions and re-keys this one.</summary>
@@ -379,7 +380,8 @@ public sealed partial class AuthService(
             throw new CloudException(409, AuthErrors.MfaAlreadyEnabled, "L'authentification à deux facteurs est déjà active.");
         }
 
-        var step = AuthSecrets.VerifyTotp(mfa.TotpSecret, code, time.GetUtcNow(), mfa.LastUsedStep);
+        var seed = OpenSeed(mfa);
+        var step = seed is null ? null : AuthSecrets.VerifyTotp(seed, code, time.GetUtcNow(), mfa.LastUsedStep);
         if (step is null)
         {
             await FailedAttemptAsync(user, AuthEvents.MfaChallengeFailed, http, principal.SessionId, ct);
@@ -641,10 +643,17 @@ public sealed partial class AuthService(
 
     private async Task<bool> AcceptTotpAsync(Guid userId, string code, CancellationToken ct)
     {
-        var mfa = await db.UserMfa.SingleOrDefaultAsync(m => m.UserId == userId && m.EnabledAt != null, ct);
-        var step = mfa is null ? null : AuthSecrets.VerifyTotp(mfa.TotpSecret, code, time.GetUtcNow(), mfa.LastUsedStep);
-        if (step is null)
+        var mfa = await db.UserMfa.AsNoTracking().SingleOrDefaultAsync(m => m.UserId == userId && m.EnabledAt != null, ct);
+        if (mfa is null)
         {
+            return false;
+        }
+
+        var seed = OpenSeed(mfa);
+        var step = seed is null ? null : AuthSecrets.VerifyTotp(seed, code, time.GetUtcNow(), mfa.LastUsedStep);
+        if (seed is null || step is null)
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(seed);
             return false;
         }
 
@@ -652,7 +661,29 @@ public sealed partial class AuthService(
         var updated = await db.UserMfa
             .Where(m => m.UserId == userId && m.LastUsedStep < step.Value)
             .ExecuteUpdateAsync(u => u.SetProperty(m => m.LastUsedStep, step.Value), ct);
+
+        // Lazy migration: a legacy plaintext seed, or one under a retired key, is re-sealed with the active key.
+        if (updated == 1 && mfa.TotpKeyId != keys.ActiveKeyId)
+        {
+            await MfaSecrets.ResealAsync(db, keys, mfa, seed, ct);
+        }
+
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(seed);
         return updated == 1;
+    }
+
+    /// <summary>Null (and an error log, no secret) if the stored seed cannot be decrypted: tampered, another user's, or unknown key.</summary>
+    private byte[]? OpenSeed(UserMfa mfa)
+    {
+        try
+        {
+            return MfaSecrets.Open(keys, mfa);
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            LogSeedUnreadable(logger, mfa.UserId, mfa.TotpKeyId ?? "(legacy)");
+            return null;
+        }
     }
 
     private async Task<bool> RedeemRecoveryCodeAsync(Guid userId, string code, CancellationToken ct)
@@ -780,6 +811,9 @@ public sealed partial class AuthService(
 
     private static CloudException InvalidToken() =>
         new(400, AuthErrors.InvalidToken, "Lien invalide, expiré ou déjà utilisé.");
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "MFA secret of user {UserId} cannot be decrypted (key {KeyId}): code refused; check POS_CLOUD_DATA_KEYS and run check-config")]
+    private static partial void LogSeedUnreadable(ILogger logger, Guid userId, string keyId);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Security mail not sent for user {UserId}: per-account limit reached")]
     private static partial void LogMailBudget(ILogger logger, Guid userId);

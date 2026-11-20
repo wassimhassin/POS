@@ -224,7 +224,8 @@ in files that are committed or shipped. Production secrets come from the hosting
 | Cloud | `POS_CLOUD_DB` (DML role), `POS_CLOUD_MIGRATION_DB` (owner) | Env | Secret store |
 | Cloud | TLS certificate | `--certificate` pfx + `POS_CLOUD_CERT_PASSWORD` | TLS terminated by the platform proxy with a public CA certificate, or a Kestrel certificate from the secret store |
 | Cloud | Identity data-protection keys, cookie settings, entitlement signing key | Sessions/tokens need no key ring (ADR-015/016); entitlement key — | Persisted protected key ring; signing key in a KMS/HSM-backed store, rotated, never in the database |
-| Cloud | Public base URLs (dashboard, QR), allowed origins | `POS_CLOUD_PUBLIC_ORIGIN` (dashboard), `POS_CLOUD_MAIL_DIR` (2.1B) | Env, per environment; mail via a provider adapter |
+| Cloud | Public base URLs (dashboard, QR), allowed origins | `POS_CLOUD_PUBLIC_ORIGIN` (dashboard), `POS_CLOUD_MAIL_DIR` or `POS_CLOUD_SMTP_*` + `POS_CLOUD_MAIL_FROM` (2.1C) | Env, per environment |
+| Cloud | Data-protection keys for secrets at rest | `POS_CLOUD_DATA_KEYS` (2.1C, ADR-020) | Secret store; rotate with `data-key-new` + `mfa-rekey` |
 | Gateway | `POS_GATEWAY_DATA_DIR`, `--listen`, sync options | Env/CLI | Set by the installer; the service runs under its own account (exists in the install script) |
 | Gateway | Cloud URL, credential | `cloud-link` (DPAPI) | Same; certificate pin optional once a public CA is used |
 | POS | Data directory, WebView2 runtime | Defaults + guard | Installer-managed |

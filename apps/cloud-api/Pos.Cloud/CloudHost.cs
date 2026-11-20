@@ -18,7 +18,8 @@ namespace Pos.Cloud;
 internal static class CloudHost
 {
     /// <param name="kestrel">Listener configuration; <c>null</c> = no network at all (a no-op server, for <c>openapi</c>).</param>
-    public static WebApplication Build(string connectionString, AuthSettings auth, ILoggerFactory loggerFactory, Action<KestrelServerOptions>? kestrel)
+    /// <param name="backgroundMail">true for the server (mails queued, sent by a background dispatcher); false for CLI commands (sent inline).</param>
+    public static WebApplication Build(string connectionString, AuthSettings auth, ILoggerFactory loggerFactory, Action<KestrelServerOptions>? kestrel, bool backgroundMail = true)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
         builder.Configuration.Sources.Clear(); // explicit configuration only: nothing can add a plain-HTTP listener
@@ -50,7 +51,22 @@ internal static class CloudHost
 
         // Cloud users: Identity (users, password hashing, lockout, security stamp) + server-side sessions.
         builder.Services.AddSingleton(auth);
-        builder.Services.AddSingleton<IAuthMailer>(sp => new PickupDirectoryMailer(auth.MailDirectory, sp.GetRequiredService<ILogger<PickupDirectoryMailer>>()));
+        builder.Services.AddSingleton(auth.Keys);
+        builder.Services.AddSingleton<IMailTransport>(auth.Mail.Smtp is { } smtp
+            ? new SmtpTransport(smtp, auth.Mail.From)
+            : new PickupDirectoryTransport(auth.Mail.PickupDirectory!, auth.Mail.From));
+        builder.Services.AddSingleton<MailDelivery>();
+        if (backgroundMail)
+        {
+            builder.Services.AddSingleton<QueuedMailer>();
+            builder.Services.AddSingleton<IAuthMailer>(sp => sp.GetRequiredService<QueuedMailer>());
+            builder.Services.AddHostedService<MailDispatcher>();
+            builder.Services.AddHostedService<AuthMaintenance>();
+        }
+        else
+        {
+            builder.Services.AddSingleton<IAuthMailer, DirectMailer>();
+        }
         builder.Services.AddScoped<SessionService>();
         builder.Services.AddScoped<AuthService>();
         builder.Services.AddIdentityCore<CloudUser>(o =>

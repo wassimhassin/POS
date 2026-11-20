@@ -83,8 +83,38 @@ public static partial class Auth
 
     public static string NewEmail(string prefix) => $"{prefix}.{Guid.NewGuid():N}"[..Math.Min(prefix.Length + 13, 40)] + "@example.tn";
 
-    /// <summary>The token in the newest mail to <paramref name="email"/> whose link path is <paramref name="linkPath"/>.</summary>
+    /// <summary>
+    /// The token in the newest mail to <paramref name="email"/> whose link path is <paramref name="linkPath"/>. Mails are
+    /// delivered by a background dispatcher: waits up to 20 s for one to appear.
+    /// </summary>
     public static string? LatestToken(CloudProcess cloud, string email, string linkPath)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (true)
+        {
+            var token = FindToken(cloud, email, linkPath);
+            if (token is not null || DateTime.UtcNow > deadline)
+            {
+                return token;
+            }
+
+            Thread.Sleep(50);
+        }
+    }
+
+    /// <summary>
+    /// Waits until every mail queued before this call has been delivered: the dispatcher is a single FIFO sender, so
+    /// once a mail requested now (fresh address, own client) has arrived, everything earlier has too.
+    /// </summary>
+    public static async Task MailBarrierAsync(CloudProcess cloud)
+    {
+        using var probe = new UserClient(cloud);
+        var email = NewEmail("barrier");
+        await JsonAsync(await probe.PostAsync("v1/auth/register", new { email, password = Password }), HttpStatusCode.Accepted);
+        Assert.NotNull(LatestToken(cloud, email, "/auth/verify-email"));
+    }
+
+    private static string? FindToken(CloudProcess cloud, string email, string linkPath)
     {
         foreach (var file in Directory.GetFiles(cloud.MailDirectory, "*.eml").OrderByDescending(f => f, StringComparer.Ordinal))
         {

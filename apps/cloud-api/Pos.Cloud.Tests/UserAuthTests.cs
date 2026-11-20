@@ -190,8 +190,8 @@ public sealed class UserAuthTests : IAsyncLifetime
         // and lifts the lockout; the token works once.
         var mails = Auth.MailCount(_cloud, email);
         await Auth.JsonAsync(await client.PostAsync("v1/auth/password/forgot", new { email }), HttpStatusCode.Accepted);
-        Assert.Equal(mails + 1, Auth.MailCount(_cloud, email));
         var token = Auth.LatestToken(_cloud, email, "/auth/reset-password")!;
+        Assert.Equal(mails + 1, Auth.MailCount(_cloud, email));
         await Auth.ErrorAsync(await client.PostAsync("v1/auth/password/reset", new { token, newPassword = "short" }), HttpStatusCode.BadRequest, "weak_password");
         await Auth.JsonAsync(await client.PostAsync("v1/auth/password/reset", new { token, newPassword = Auth.OtherPassword }), HttpStatusCode.OK);
         await Auth.ErrorAsync(await client.PostAsync("v1/auth/password/reset", new { token, newPassword = Auth.Password }), HttpStatusCode.BadRequest, "invalid_token");
@@ -233,6 +233,7 @@ public sealed class UserAuthTests : IAsyncLifetime
             Assert.Equal(await a.Content.ReadAsStringAsync(), await b.Content.ReadAsStringAsync());
         }
 
+        Assert.NotNull(Auth.LatestToken(_cloud, known, "/auth/reset-password")); // delivered after the unknown-address requests (FIFO)
         Assert.Equal(0, Auth.MailCount(_cloud, unknown));
         Assert.Equal(0, _cloud.Count("SELECT COUNT(*) FROM users WHERE normalized_email = upper(@p0)", unknown));
 
@@ -242,6 +243,7 @@ public sealed class UserAuthTests : IAsyncLifetime
             await client.PostAsync("v1/auth/password/forgot", new { email = known });
         }
 
+        await Auth.MailBarrierAsync(_cloud);
         Assert.True(Auth.MailCount(_cloud, known) <= 4, $"{Auth.MailCount(_cloud, known)} mails"); // verification + 3 per 15 min
 
         // Not signed in: identity endpoints are 401, with or without a forged cookie.

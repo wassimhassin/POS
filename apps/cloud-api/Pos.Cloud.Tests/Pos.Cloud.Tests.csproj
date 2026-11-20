@@ -23,6 +23,7 @@
   <ItemGroup>
     <!-- The gateway test kit (real gateway process + simulated terminals) is shared, not copied. -->
     <Compile Include="..\..\branch-gateway\Pos.Gateway.Tests\GatewayTestKit.cs" Link="GatewayTestKit.cs" />
+    <Compile Include="..\..\branch-gateway\Pos.Gateway.Tests\TcpProxy.cs" Link="TcpProxy.cs" />
   </ItemGroup>
 
   <ItemGroup>

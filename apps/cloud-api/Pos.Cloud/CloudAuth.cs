@@ -171,9 +171,17 @@ public sealed partial class ReportKeyHandler(
     private static partial void LogRefused(ILogger logger, string reason, string? remoteAddress);
 }
 
-/// <summary>Gateway registration with a one-time provisioning code + proof of possession of its private key.</summary>
+/// <summary>
+/// Gateway registration with a one-time provisioning code + proof of possession of its private key.
+/// A code is consumed by exactly one key. Presenting it again with that same key (the reply was lost: timeout,
+/// dropped connection) returns the same registration instead of an error, so the gateway can retry safely;
+/// any other key still gets invalid_code. Concurrent attempts are serialized by the code row lock.
+/// </summary>
 public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, ILogger<GatewayRegistration> logger)
 {
+    /// <summary>How long after first use the same key may replay a code (a gateway retries within minutes; offline gateways for days).</summary>
+    public static readonly TimeSpan ReplayWindow = TimeSpan.FromDays(7);
+
     private const string CodeAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
     private const int CodeLength = 20;
 
@@ -218,6 +226,23 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
         var hash = HashCode(request.Code);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var code = await db.ProvisioningCodes.FromSql($"SELECT * FROM provisioning_codes WHERE code_hash = {hash} FOR UPDATE").SingleOrDefaultAsync(ct);
+        var fingerprint = SyncProtocol.Sha256Hex(publicKey);
+        if (code is { UsedAt: { } usedAt, UsedByGatewayId: { } usedBy })
+        {
+            // Idempotent retry: only the very key that consumed the code (possession just proven above), for the same
+            // branch, while that credential is still active and within the replay window. Nothing is written.
+            var previous = await db.GatewayCredentials.AsNoTracking().SingleOrDefaultAsync(g => g.Id == usedBy, ct);
+            if (previous is null || previous.RevokedAt is not null || previous.BranchId != branchId || now - usedAt > ReplayWindow
+                || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(previous.PublicKeySha256), Encoding.ASCII.GetBytes(fingerprint)))
+            {
+                throw Invalid();
+            }
+
+            await tx.CommitAsync(ct);
+            LogReplayed(logger, previous.Id, branchId);
+            return await ResponseAsync(previous.Id, code, ct);
+        }
+
         if (code is null || code.UsedAt is not null || code.ExpiresAt <= now)
         {
             throw Invalid();
@@ -245,7 +270,6 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
             LogReplaced(logger, previous.Id, branchId);
         }
 
-        var fingerprint = SyncProtocol.Sha256Hex(publicKey);
         if (await db.GatewayCredentials.AnyAsync(g => g.PublicKeySha256 == fingerprint, ct))
         {
             throw new CloudException(409, "key_already_registered", "Cette clé est déjà enregistrée.");
@@ -266,21 +290,28 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
         code.UsedByGatewayId = credential.Id;
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        LogRegistered(logger, credential.Id, branchId, code.BusinessId, code.OrganizationId);
+        return await ResponseAsync(credential.Id, code, ct);
+    }
 
+    private async Task<RegisterGatewayResponse> ResponseAsync(Guid gatewayId, ProvisioningCode code, CancellationToken ct)
+    {
         var names = await (from b in db.Branches
                            join bu in db.Businesses on b.BusinessId equals bu.Id
                            join o in db.Organizations on bu.OrganizationId equals o.Id
-                           where b.Id == branchId
+                           where b.Id == code.BranchId
                            select new { Branch = b.Name, Business = bu.Name, Organization = o.Name }).SingleAsync(ct);
-        LogRegistered(logger, credential.Id, branchId, code.BusinessId, code.OrganizationId);
-        return new RegisterGatewayResponse(credential.Id.ToString("D"), code.OrganizationId.ToString("D"), names.Organization,
-            code.BusinessId.ToString("D"), names.Business, branchId.ToString("D"), names.Branch);
+        return new RegisterGatewayResponse(gatewayId.ToString("D"), code.OrganizationId.ToString("D"), names.Organization,
+            code.BusinessId.ToString("D"), names.Business, code.BranchId.ToString("D"), names.Branch);
     }
 
     private static CloudException Invalid() => new(401, "invalid_code", "Code de provisionnement invalide, expiré ou déjà utilisé, ou preuve de clé invalide.");
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Gateway {GatewayId} of branch {BranchId} revoked: replaced by a newly registered gateway")]
     private static partial void LogReplaced(ILogger logger, Guid gatewayId, Guid branchId);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Gateway {GatewayId} of branch {BranchId} repeated its registration (same key): previous reply returned")]
+    private static partial void LogReplayed(ILogger logger, Guid gatewayId, Guid branchId);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Gateway {GatewayId} registered for branch {BranchId} (business {BusinessId}, organization {OrganizationId})")]
     private static partial void LogRegistered(ILogger logger, Guid gatewayId, Guid branchId, Guid businessId, Guid organizationId);

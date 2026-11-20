@@ -320,3 +320,18 @@ See [docs/11-CI-AND-API-FOUNDATIONS.md](docs/11-CI-AND-API-FOUNDATIONS.md).
 - **New required settings:** `POS_CLOUD_PUBLIC_ORIGIN` and `POS_CLOUD_MAIL_DIR`.
 
 See [docs/12-CLOUD-AUTHENTICATION.md](docs/12-CLOUD-AUTHENTICATION.md) for the architecture, decisions and limitations.
+
+## Security and reliability hardening (Phase 2.1C)
+
+- **Provisioning and enrollment survive lost replies.** A gateway or terminal that retries with the same key gets
+  its original registration back; any other identity is still refused. Terminal enrollment retries transport failures.
+- **MFA secrets are encrypted at rest** with AES-256-GCM application keys (`POS_CLOUD_DATA_KEYS`). Keys rotate with
+  `Pos.Cloud data-key-new` and `Pos.Cloud mfa-rekey`; legacy plaintext rows are migrated.
+- **Email delivery:** a background queue with retries, through a pickup directory (dev) or SMTP with STARTTLS
+  (`POS_CLOUD_SMTP_HOST`, `_PORT`, `_TLS`, `_USER`, `_PASSWORD`, `POS_CLOUD_MAIL_FROM`).
+- **Retention:** hourly bounded cleanup of ended sessions, expired tokens and abandoned MFA setups
+  (`Pos.Cloud cleanup`). The audit is kept at least 365 days and pruned only by the owner role
+  (`Pos.Cloud audit-prune`).
+- **New required setting:** `POS_CLOUD_DATA_KEYS`.
+
+See [docs/13-SECURITY-RELIABILITY-HARDENING.md](docs/13-SECURITY-RELIABILITY-HARDENING.md).

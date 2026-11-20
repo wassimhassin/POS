@@ -277,7 +277,7 @@ public sealed class ConfigValidationTests : IAsyncLifetime
             new Dictionary<string, string?> { ["POS_CLOUD_PUBLIC_ORIGIN"] = null, ["POS_CLOUD_MAIL_DIR"] = null }, CheckConfig());
         Assert.Equal(2, exitCode);
         Assert.Contains("POS_CLOUD_PUBLIC_ORIGIN : variable d'environnement requise", output, StringComparison.Ordinal);
-        Assert.Contains("POS_CLOUD_MAIL_DIR : variable d'environnement requise", output, StringComparison.Ordinal);
+        Assert.Contains("POS_CLOUD_MAIL_DIR ou POS_CLOUD_SMTP_HOST : un transport d'e-mails de sécurité est requis", output, StringComparison.Ordinal);
 
         foreach (var origin in new[] { "http://dashboard.test", "https://dashboard.test/app", "https://dashboard.test/", "dashboard.test" })
         {
@@ -290,6 +290,49 @@ public sealed class ConfigValidationTests : IAsyncLifetime
             new Dictionary<string, string?> { ["POS_CLOUD_MAIL_DIR"] = Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}") }, CheckConfig());
         Assert.Equal(2, exitCode);
         Assert.Contains("POS_CLOUD_MAIL_DIR : dossier absolu existant requis", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mail_transport_and_data_keys_are_validated_without_echoing_secrets()
+    {
+        (int, string) Check(Dictionary<string, string?> env) => _cloud.AdminRaw(env, CheckConfig());
+        var smtp = new Dictionary<string, string?>
+        {
+            ["POS_CLOUD_MAIL_DIR"] = null,
+            ["POS_CLOUD_SMTP_HOST"] = "127.0.0.1",
+            ["POS_CLOUD_SMTP_TLS"] = "none",
+            ["POS_CLOUD_MAIL_FROM"] = "securite@example.tn",
+        };
+        Assert.Equal(0, Check(smtp).Item1); // a valid SMTP configuration (no connection is attempted)
+
+        string Errors(Dictionary<string, string?> changes)
+        {
+            var env = new Dictionary<string, string?>(smtp);
+            foreach (var (k, v) in changes)
+            {
+                env[k] = v;
+            }
+
+            var (exitCode, output) = Check(env);
+            Assert.True(exitCode == 2, output);
+            Assert.DoesNotContain(SecretMarker, output, StringComparison.Ordinal);
+            return output;
+        }
+
+        Assert.Contains("choisissez un seul transport", Errors(new() { ["POS_CLOUD_MAIL_DIR"] = _cloud.MailDirectory }), StringComparison.Ordinal);
+        Assert.Contains("un transport d'e-mails de sécurité est requis", Errors(new() { ["POS_CLOUD_SMTP_HOST"] = null }), StringComparison.Ordinal);
+        Assert.Contains("« none » n'est autorisé que vers un relais local", Errors(new() { ["POS_CLOUD_SMTP_HOST"] = "smtp.example.tn" }), StringComparison.Ordinal);
+        Assert.Contains("465 (TLS implicite)", Errors(new() { ["POS_CLOUD_SMTP_PORT"] = "465" }), StringComparison.Ordinal);
+        Assert.Contains("port entre 1 et 65535", Errors(new() { ["POS_CLOUD_SMTP_PORT"] = "70000" }), StringComparison.Ordinal);
+        Assert.Contains("à définir ensemble", Errors(new() { ["POS_CLOUD_SMTP_PASSWORD"] = SecretMarker }), StringComparison.Ordinal);
+        Assert.Contains("POS_CLOUD_MAIL_FROM : expéditeur requis", Errors(new() { ["POS_CLOUD_MAIL_FROM"] = null }), StringComparison.Ordinal);
+        Assert.Contains("POS_CLOUD_SMTP_TLS : « starttls »", Errors(new() { ["POS_CLOUD_SMTP_TLS"] = SecretMarker }), StringComparison.Ordinal);
+
+        Assert.Contains("POS_CLOUD_DATA_KEYS : variable d'environnement requise", Errors(new() { ["POS_CLOUD_DATA_KEYS"] = null }), StringComparison.Ordinal);
+        Assert.Contains("POS_CLOUD_DATA_KEYS : entrée 1 invalide", Errors(new() { ["POS_CLOUD_DATA_KEYS"] = $"k1:{SecretMarker}" }), StringComparison.Ordinal);
+        var key = CloudProcess.NewDataKey("dup");
+        Assert.Contains("identifiant de clé en double", Errors(new() { ["POS_CLOUD_DATA_KEYS"] = $"{key},{key}" }), StringComparison.Ordinal);
+        Assert.DoesNotContain(key.Split(':')[1], Errors(new() { ["POS_CLOUD_DATA_KEYS"] = $"{key},{key}" }), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -88,9 +88,9 @@ public sealed class CloudSyncTests : IAsyncLifetime
     [Fact]
     public async Task Cloud_killed_while_draining_a_large_backlog_then_restarted_ends_with_each_event_once()
     {
-        // Generous request timeout: provisioning codes are single use, so a registration whose reply arrives after the
-        // gateway gave up cannot be retried with the same code (known limitation, doc 12 §5) and the drain never starts.
-        await using var branch = await BranchUnderTest.CreateAsync(_cloud, _organization, _business, "Centre", link: false, batchSize: 1, syncTimeoutSeconds: 30);
+        // Default 5 s request timeout on purpose: a registration reply that arrives late is retried with the same key
+        // and the cloud repeats it (2.1C), so a slow first request under load no longer stalls the drain.
+        await using var branch = await BranchUnderTest.CreateAsync(_cloud, _organization, _business, "Centre", link: false, batchSize: 1);
         var a = await branch.TerminalAsync("Caisse A");
         var orders = new List<SharedOrder>();
         for (var i = 0; i < 25; i++)
@@ -232,7 +232,7 @@ public sealed class CloudSyncTests : IAsyncLifetime
         // Back to the Phase 1.3 schema (no outbox), as an already-deployed gateway would be.
         await branch.Gateway.KillAsync();
         branch.ExecuteGatewaySql("DROP TABLE recovery_state; DROP TABLE recovery_quarantine; DROP TABLE backup_config; DROP TABLE backup_runs; " +
-            "DROP TABLE sync_outbox; DROP TABLE cloud_link; DROP TABLE sync_state; DELETE FROM gateway_schema WHERE version IN (2, 3);");
+            "DROP TABLE sync_outbox; DROP TABLE cloud_link; DROP TABLE sync_state; DELETE FROM gateway_schema WHERE version IN (2, 3, 4);");
         await branch.Gateway.StartAsync();
         await a.WaitConnectedAsync();
 

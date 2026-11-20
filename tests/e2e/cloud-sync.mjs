@@ -77,6 +77,7 @@ await runTest('cloud-sync', async (session) => {
     POS_CLOUD_CERT_PASSWORD: certPassword,
     POS_CLOUD_PUBLIC_ORIGIN: 'https://dashboard.test',
     POS_CLOUD_MAIL_DIR: mailDir,
+    POS_CLOUD_DATA_KEYS: `e2e1:${randomBytes(32).toString('base64')}`,
   };
   const cloudCli = (...args) => {
     const out = execFileSync(clExe, args, { encoding: 'utf8', env: cloudEnv });

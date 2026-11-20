@@ -206,6 +206,11 @@ public sealed partial class GatewayStore
             error       TEXT    NULL
         );
         """,
+        // 4: the registration key is created once per provisioning code and kept (DPAPI-protected) until the cloud
+        // confirms, so a registration whose reply was lost is retried with the same identity (idempotent in the cloud).
+        """
+        ALTER TABLE cloud_link ADD COLUMN pending_private_key BLOB NULL;
+        """,
     ];
 
     private const string CodeAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"; // no I/L/O/U/0/1 look-alikes
@@ -328,11 +333,36 @@ public sealed partial class GatewayStore
         return (string.Join('-', code.Chunk(5).Select(c => new string(c))), expiresAt);
     }
 
-    /// <summary>Consumes a pairing code and registers the terminal's public key, atomically.</summary>
+    /// <summary>How long the terminal that consumed a pairing code may repeat its enrollment (reply lost).</summary>
+    public static readonly TimeSpan EnrollReplayWindow = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// Consumes a pairing code and registers the terminal's public key, atomically. The same terminal presenting the
+    /// same key again (its reply was lost) gets the same enrollment back; any other identity is refused.
+    /// </summary>
     internal TerminalRecord? EnrollTerminal(string code, string terminalId, byte[] publicKey, string branchId)
     {
         using var connection = Database.OpenConnection();
         using var tx = connection.BeginTransaction();
+        using var used = Command(connection, tx, """
+            SELECT c.used_at FROM enrollment_codes c JOIN terminals t ON t.id = c.used_by
+            WHERE c.code_hash = $hash AND c.used_by = $id AND t.public_key = $key AND t.status = 'active';
+            """);
+        used.Parameters.AddWithValue("$hash", HashCode(GatewayProtocol.NormalizeCode(code)));
+        used.Parameters.AddWithValue("$id", terminalId);
+        used.Parameters.AddWithValue("$key", publicKey);
+        if (used.ExecuteScalar() is string usedAt)
+        {
+            tx.Rollback();
+            if (_time.GetUtcNow() - DateTimeOffset.Parse(usedAt, CultureInfo.InvariantCulture) > EnrollReplayWindow)
+            {
+                return null;
+            }
+
+            _logger.LogInformation("Terminal {TerminalId} repeated its enrollment (same key): previous reply returned", terminalId);
+            return GetTerminal(terminalId);
+        }
+
         using var find = Command(connection, tx, """
             SELECT terminal_name FROM enrollment_codes WHERE code_hash = $hash AND used_at IS NULL AND expires_at > $now;
             """);

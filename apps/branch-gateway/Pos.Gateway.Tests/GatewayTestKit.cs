@@ -105,6 +105,7 @@ public sealed partial class GatewayProcess : IAsyncDisposable
         }
 
         _process = Process.Start(info)!;
+        TestProcesses.Track(_process);
         _process.OutputDataReceived += (_, e) => Record(e.Data);
         _process.ErrorDataReceived += (_, e) => Record(e.Data);
         _process.BeginOutputReadLine();
@@ -319,6 +320,40 @@ public sealed class SimTerminal : IAsyncDisposable
         catch (IOException)
         {
         }
+    }
+}
+
+/// <summary>
+/// Every server process a test starts. Killed when the test host exits, so a fixture whose InitializeAsync threw (xUnit
+/// then skips DisposeAsync) cannot leave a cloud or gateway running.
+/// </summary>
+public static class TestProcesses
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Process> Running = new();
+
+    static TestProcesses() => AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+    {
+        foreach (var process in Running.Values)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+            }
+        }
+    };
+
+    public static void Track(Process process)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        Running[process.Id] = process;
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => Running.TryRemove(process.Id, out _);
     }
 }
 

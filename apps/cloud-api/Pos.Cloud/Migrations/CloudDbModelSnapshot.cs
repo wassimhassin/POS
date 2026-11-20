@@ -579,6 +579,9 @@ namespace Pos.Cloud.Migrations
                     b.HasKey("TokenHash")
                         .HasName("pk_auth_tokens");
 
+                    b.HasIndex("ExpiresAt")
+                        .HasDatabaseName("ix_auth_tokens_expires_at");
+
                     b.HasIndex("OrganizationId")
                         .HasDatabaseName("ix_auth_tokens_organization_id");
 
@@ -766,6 +769,11 @@ namespace Pos.Cloud.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("last_used_step");
 
+                    b.Property<string>("TotpKeyId")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("totp_key_id");
+
                     b.Property<byte[]>("TotpSecret")
                         .IsRequired()
                         .HasColumnType("bytea")
@@ -773,6 +781,9 @@ namespace Pos.Cloud.Migrations
 
                     b.HasKey("UserId")
                         .HasName("pk_user_mfa");
+
+                    b.HasIndex("TotpKeyId")
+                        .HasDatabaseName("ix_user_mfa_totp_key_id");
 
                     b.ToTable("user_mfa", (string)null);
                 });
@@ -846,6 +857,9 @@ namespace Pos.Cloud.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_user_sessions");
+
+                    b.HasIndex("ExpiresAt")
+                        .HasDatabaseName("ix_user_sessions_expires_at");
 
                     b.HasIndex("PreviousTokenHash")
                         .HasDatabaseName("ix_user_sessions_previous_token_hash");

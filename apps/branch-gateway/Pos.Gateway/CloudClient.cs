@@ -24,7 +24,7 @@ public sealed class CloudClient(GatewayStore store, TimeSpan timeout) : IDisposa
     {
         ArgumentNullException.ThrowIfNull(link);
         var identity = store.GetIdentity() ?? throw new SyncFailureException("Passerelle non initialisée.");
-        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var key = store.PendingCloudKey(link); // same key on every retry of this code
         var publicKey = key.ExportSubjectPublicKeyInfo();
         var signature = key.SignData(SyncProtocol.RegisterPayload(link.PendingCode!, identity.BranchId, publicKey), HashAlgorithmName.SHA256);
         var request = new RegisterGatewayRequest(link.PendingCode!, identity.BranchId, Convert.ToBase64String(publicKey), Convert.ToBase64String(signature));

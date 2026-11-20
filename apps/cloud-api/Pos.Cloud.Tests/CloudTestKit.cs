@@ -173,6 +173,11 @@ public sealed partial class CloudProcess : IAsyncDisposable
     private readonly Dictionary<string, string> _environment = new(StringComparer.Ordinal);
     private readonly string _dir;
     private readonly string _certificatePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+
+    /// <summary>A fresh data-protection key ring per cloud (POS_CLOUD_DATA_KEYS): "id:base64" entries, first = active.</summary>
+    public static string NewDataKey(string id) => $"{id}:{Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))}";
+
+    public string DataKeys { get; } = NewDataKey("test1");
     private Process? _process;
 
     public CloudProcess()
@@ -226,12 +231,8 @@ public sealed partial class CloudProcess : IAsyncDisposable
     public async Task StartAsync()
     {
         var info = Info([.. RunArgs(), .. RunArguments]);
-        foreach (var (name, value) in _environment)
-        {
-            info.Environment[name] = value;
-        }
-
         _process = Process.Start(info)!;
+        TestProcesses.Track(_process);
         _process.OutputDataReceived += (_, e) => { if (e.Data is not null) Log.Enqueue(e.Data); };
         _process.ErrorDataReceived += (_, e) => { if (e.Data is not null) Log.Enqueue(e.Data); };
         _process.BeginOutputReadLine();
@@ -443,6 +444,12 @@ public sealed partial class CloudProcess : IAsyncDisposable
         info.Environment["POS_CLOUD_CERT_PASSWORD"] = _certificatePassword;
         info.Environment["POS_CLOUD_PUBLIC_ORIGIN"] = PublicOrigin;
         info.Environment["POS_CLOUD_MAIL_DIR"] = MailDirectory;
+        info.Environment["POS_CLOUD_DATA_KEYS"] = DataKeys;
+        foreach (var (name, value) in _environment)
+        {
+            info.Environment[name] = value; // overrides apply to run AND admin commands (same key ring, mail settings)
+        }
+
         return info;
     }
 }

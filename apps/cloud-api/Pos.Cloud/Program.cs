@@ -20,6 +20,10 @@ using Pos.Sync;
 //   Pos.Cloud gateways        [--branch <guid>]
 //   Pos.Cloud gateway-revoke  --gateway <guid>
 //   Pos.Cloud owner-invite    --org <guid> --email <address>     emails a one-time owner invitation (72 h; MFA required to accept)
+//   Pos.Cloud data-key-new                                             prints a new data-protection key entry (POS_CLOUD_DATA_KEYS)
+//   Pos.Cloud mfa-rekey                                                re-encrypts MFA secrets with the active data key (legacy + old keys)
+//   Pos.Cloud cleanup                                                  deletes ended sessions (30 d), expired tokens (7 d), abandoned MFA setups
+//   Pos.Cloud audit-prune     [--older-than-days 400]                  owner role (POS_CLOUD_MIGRATION_DB); minimum 365 days
 //   Pos.Cloud report-key      --org <guid> [--business <guid> [--branch <guid>]] --name <name>
 //   Pos.Cloud dev-cert        --out <file.pfx> [--host <name-or-ip>]...  (POS_CLOUD_CERT_PASSWORD)
 //   Pos.Cloud run             --listen https://<ip>:<port> --certificate <file.pfx> [--openapi]  (--openapi serves /openapi/v1.json)
@@ -185,11 +189,53 @@ try
             var email = options.Required("email");
             var problems = new List<string>();
             var auth = CloudSettings.LoadAuth(Environment.GetEnvironmentVariable, problems) ?? throw new CliException(string.Join(" ", problems));
-            await using var app = CloudHost.Build(Cli.ConnectionString(CloudSettings.RuntimeDb), auth, loggerFactory, kestrel: null);
+            await using var app = CloudHost.Build(Cli.ConnectionString(CloudSettings.RuntimeDb), auth, loggerFactory, kestrel: null, backgroundMail: false);
             await using var scope = app.Services.CreateAsyncScope();
             var expires = await scope.ServiceProvider.GetRequiredService<Pos.Cloud.Identity.AuthService>().InviteOwnerAsync(organizationId, email, CancellationToken.None);
             Console.WriteLine("invite=sent");
             Console.WriteLine($"expires_at={expires:O}");
+            return 0;
+        }
+
+        case "data-key-new":
+            // A new data-protection key entry for the secret store (printed once; put it FIRST in POS_CLOUD_DATA_KEYS
+            // to make it active, keep the previous keys after it until « mfa-rekey » has moved everything).
+            Console.WriteLine($"data_key={Pos.Cloud.Identity.SecretKeyRing.NewKeyEntry(DateTimeOffset.UtcNow)}");
+            return 0;
+
+        case "mfa-rekey":
+        {
+            var problems = new List<string>();
+            var keys = Pos.Cloud.Identity.SecretKeyRing.Parse(Environment.GetEnvironmentVariable(CloudSettings.DataKeys), CloudSettings.DataKeys, problems)
+                ?? throw new CliException(string.Join(" ", problems));
+            await using var db = Cli.Db();
+            var result = await Pos.Cloud.Identity.MfaSecrets.RekeyAllAsync(db, keys, 200, CancellationToken.None);
+            Console.WriteLine($"resealed={result.Resealed}");
+            Console.WriteLine($"unreadable={result.Unreadable}");
+            Console.WriteLine($"remaining={result.Remaining}");
+            return result.Remaining == 0 ? 0 : 1;
+        }
+
+        case "cleanup":
+        {
+            // The same pass the server runs hourly (runtime role): ended sessions, expired tokens, abandoned MFA setups.
+            await using var db = Cli.Db();
+            var result = await Pos.Cloud.Identity.AuthRetention.CleanupAsync(db, DateTimeOffset.UtcNow, CancellationToken.None);
+            Console.WriteLine($"sessions={result.Sessions}");
+            Console.WriteLine($"tokens={result.Tokens}");
+            Console.WriteLine($"abandoned_mfa={result.AbandonedMfa}");
+            Console.WriteLine($"complete={(result.Complete ? 1 : 0)}");
+            return 0;
+        }
+
+        case "audit-prune":
+        {
+            // Owner role only: the runtime role cannot delete audit rows. Minimum retention enforced.
+            var days = int.TryParse(options.One("older-than-days") ?? Pos.Cloud.Identity.AuthRetention.DefaultAuditDays.ToString(CultureInfo.InvariantCulture),
+                NumberStyles.None, CultureInfo.InvariantCulture, out var d) ? d : throw new CliException("--older-than-days : nombre entier attendu.");
+            await using var db = Cli.Db(CloudSettings.MigrationDb);
+            var deleted = await Pos.Cloud.Identity.AuthRetention.PruneAuditAsync(db, DateTimeOffset.UtcNow, days, CancellationToken.None);
+            Console.WriteLine($"audit_deleted={deleted}");
             return 0;
         }
 
@@ -305,6 +351,26 @@ static async Task<int> CheckConfigAsync(Cli options, ILogger log)
         {
             errors.Add($"{CloudSettings.RuntimeDb} : le rôle applicatif ne doit pas pouvoir modifier ni supprimer le journal de sécurité (REVOKE UPDATE, DELETE ON auth_audit_events).");
         }
+
+        if (pending.Count == 0)
+        {
+            // MFA seeds: every one must be readable with the configured keys; legacy or old-key rows need mfa-rekey.
+            var keys = settings.Auth.Keys;
+            var configured = keys.KeyIds.ToList();
+            var unreadable = await db.UserMfa.CountAsync(m => m.TotpKeyId != null && !configured.Contains(m.TotpKeyId));
+            if (unreadable > 0)
+            {
+                errors.Add($"{CloudSettings.DataKeys} : {unreadable} secret(s) MFA chiffré(s) avec une clé absente de la configuration (remettez l'ancienne clé, puis « mfa-rekey »).");
+            }
+
+            var legacy = await db.UserMfa.CountAsync(m => m.TotpKeyId == null);
+            var stale = await db.UserMfa.CountAsync(m => m.TotpKeyId != null && m.TotpKeyId != keys.ActiveKeyId && configured.Contains(m.TotpKeyId));
+            if (legacy + stale > 0)
+            {
+                log.LogWarning("Configuration: {Count} MFA secret(s) not under the active key ({Legacy} unencrypted, {Stale} on an older key): run « Pos.Cloud mfa-rekey »", legacy + stale, legacy, stale);
+                Console.WriteLine($"mfa_rekey_needed={legacy + stale}");
+            }
+        }
     }
     catch (Exception ex) when (ex is Npgsql.NpgsqlException or InvalidOperationException or TimeoutException)
     {
@@ -328,7 +394,11 @@ static async Task<int> WriteOpenApiAsync(Cli options, ILoggerFactory loggerFacto
 {
     var path = Path.GetFullPath(options.Required("out"));
     // A syntactically valid placeholder: the document is generated from endpoint metadata, the database is never opened.
-    await using var app = CloudHost.Build("Host=openapi.invalid;Database=none;Username=none", new Pos.Cloud.Identity.AuthSettings("https://openapi.invalid", Path.GetTempPath()), loggerFactory, kestrel: null);
+    // Placeholder settings: the document needs a started host, not a database, mail transport or real keys.
+    var placeholder = new Pos.Cloud.Identity.AuthSettings("https://openapi.invalid",
+        new Pos.Cloud.Identity.MailSettings(Pos.Cloud.Identity.MailSettings.DefaultFrom, Path.GetTempPath(), null),
+        Pos.Cloud.Identity.SecretKeyRing.Parse(Pos.Cloud.Identity.SecretKeyRing.NewKeyEntry(DateTimeOffset.UtcNow), "openapi", [])!);
+    await using var app = CloudHost.Build("Host=openapi.invalid;Database=none;Username=none", placeholder, loggerFactory, kestrel: null, backgroundMail: false);
     CloudHost.UsePipeline(app, exposeOpenApi: false);
     await app.StartAsync(); // no-op server: nothing listens
     var json = await CloudHost.OpenApiJsonAsync(app);

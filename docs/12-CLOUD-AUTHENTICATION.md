@@ -27,7 +27,7 @@ their policy explicitly.
 | HTTP surface | `Identity/AuthApi.cs` | Endpoints, policies, origin guard; mapped into the `/v1` group |
 | Single-use tokens | `auth_tokens` | Email verification (24 h), password reset (1 h), owner invitation (72 h); SHA-256 stored, consumed atomically |
 | TOTP + recovery codes | `Identity/AuthSecrets.cs`, `user_mfa`, `user_recovery_codes` | RFC 6238 (SHA-1, 6 digits, 30 s, ±1 step, no replay); 10 recovery codes, hashed |
-| Mail | `IAuthMailer` → `PickupDirectoryMailer` | Writes RFC 5322 `.eml` files to `POS_CLOUD_MAIL_DIR`; a relay/provider adapter is a later step |
+| Mail | `IAuthMailer` → in-memory queue → `IMailTransport` | Pickup directory (`POS_CLOUD_MAIL_DIR`) or SMTP (`POS_CLOUD_SMTP_*`), with retries: doc 13 §4 |
 | Audit | `auth_audit_events` | Event name, user/org/session ids, IP, user agent. Append-only for the runtime role |
 | Future tenancy | `organization_memberships` (org, user, role, revoked_at) | Only role `owner` exists; no permission checks use it yet |
 
@@ -141,7 +141,7 @@ grant nothing until RBAC (2.1C). Gateway and report-key isolation are unchanged.
 | Setting | Rule |
 |---|---|
 | `POS_CLOUD_PUBLIC_ORIGIN` | Required. `https://host[:port]`, no path or trailing slash. Used in email links and the origin check |
-| `POS_CLOUD_MAIL_DIR` | Required. An existing, absolute, writable directory. Security mails are written there as `.eml` for a relay to pick up |
+| `POS_CLOUD_MAIL_DIR` or `POS_CLOUD_SMTP_HOST` | Exactly one mail transport (doc 13 §4, §6). `POS_CLOUD_DATA_KEYS` is required too (doc 13 §3) |
 | Database (`check-config`) | Additionally: the runtime role must not have `UPDATE`/`DELETE` on `auth_audit_events` |
 
 Both settings are validated by `run` and `check-config` like the others (doc 11 §4); messages never echo values.
@@ -151,12 +151,9 @@ The OpenAPI document adds the `Session` cookie scheme; the snapshot is regenerat
 
 ## 5. Remaining limitations (honest)
 
-1. **Mail delivery.** Only a pickup directory. Production needs an SMTP or provider adapter behind `IAuthMailer`, with
-   bounce handling and SPF/DKIM. Until then something must forward the `.eml` files.
-2. **TOTP secrets are stored unencrypted** in `user_mfa` (database access ⇒ second factor bypass). Envelope
-   encryption with a key from the secret store is planned.
-3. **No cleanup job** for expired sessions, consumed tokens or old audit rows. Rows are small, but retention must be
-   defined.
+Items 1–3 and 10 of the 2.1B list (pickup-only mail, plaintext TOTP seeds, no cleanup, non-retryable gateway
+registration) were fixed in Phase 2.1C: see [doc 13](13-SECURITY-RELIABILITY-HARDENING.md).
+
 4. **No breached-password check** (k-anonymity range API or local list), and **no WebAuthn/passkeys** (TOTP only).
 5. **Rate limits are per process**, in memory. Several instances need a shared limiter or an edge limiter.
    `RemoteIpAddress` assumes no reverse proxy: behind a proxy, forwarded headers must be configured with known proxies.
@@ -166,13 +163,6 @@ The OpenAPI document adds the `Session` cookie scheme; the snapshot is regenerat
 8. Lockout lets an attacker lock a known account for 15 minutes (the usual trade-off). Per-IP limits slow this down
    but do not prevent it.
 9. Not validated against a real browser or dashboard (none exists yet). The tests use an HTTP client with a cookie jar.
-10. **Pre-existing, found while testing this phase (gateway provisioning, unchanged here by design):** a gateway
-    whose `register` reply is lost (client timeout, dropped connection) cannot retry. The cloud has already consumed
-    the single-use code, so every retry gets 401 `invalid_code` and an operator must issue a new code. The
-    first request after a cloud start is slower now (bigger EF model), which made this visible in a loaded test
-    run. The affected test now uses a 30 s request timeout. Fix proposed for 2.1C: an idempotent retry when the
-    same code is presented with the same, already registered public key and a valid proof.
-
 ---
 
 ## 6. Tests

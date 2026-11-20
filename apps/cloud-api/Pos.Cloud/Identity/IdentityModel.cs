@@ -72,7 +72,12 @@ public static class TokenPurposes
 public sealed class UserMfa
 {
     public Guid UserId { get; set; }
+
+    /// <summary>The TOTP seed, encrypted with <see cref="SecretKeyRing"/> (key id in <see cref="TotpKeyId"/>); legacy rows: plaintext, key id null.</summary>
     public byte[] TotpSecret { get; set; } = [];
+
+    /// <summary>Key that encrypts <see cref="TotpSecret"/>; null only for rows written before 2.1C (run <c>mfa-rekey</c>).</summary>
+    public string? TotpKeyId { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? EnabledAt { get; set; }
 
@@ -142,6 +147,7 @@ internal static class IdentityModel
             e.HasIndex(x => x.TokenHash).IsUnique();
             e.HasIndex(x => x.PreviousTokenHash);
             e.HasIndex(x => new { x.UserId, x.RevokedAt });
+            e.HasIndex(x => x.ExpiresAt); // retention cleanup
             e.Property(x => x.Kind).HasMaxLength(20);
             e.Property(x => x.SecurityStamp).HasMaxLength(100);
             e.Property(x => x.RevokeReason).HasMaxLength(40);
@@ -159,6 +165,7 @@ internal static class IdentityModel
             });
             e.HasKey(x => x.TokenHash);
             e.HasIndex(x => new { x.UserId, x.Purpose, x.CreatedAt });
+            e.HasIndex(x => x.ExpiresAt); // retention cleanup
             e.Property(x => x.Purpose).HasMaxLength(20);
             e.Property(x => x.NormalizedEmail).HasMaxLength(256);
             e.HasOne<CloudUser>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
@@ -169,6 +176,8 @@ internal static class IdentityModel
         {
             e.ToTable("user_mfa");
             e.HasKey(x => x.UserId);
+            e.Property(x => x.TotpKeyId).HasMaxLength(32);
+            e.HasIndex(x => x.TotpKeyId);
             e.HasOne<CloudUser>().WithOne().HasForeignKey<UserMfa>(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         });
 

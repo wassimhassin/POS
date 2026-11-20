@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -34,6 +35,13 @@ internal static class CloudSettings
     public const string CertificatePassword = "POS_CLOUD_CERT_PASSWORD";
     public const string PublicOrigin = "POS_CLOUD_PUBLIC_ORIGIN";
     public const string MailDirectory = "POS_CLOUD_MAIL_DIR";
+    public const string MailFrom = "POS_CLOUD_MAIL_FROM";
+    public const string SmtpHost = "POS_CLOUD_SMTP_HOST";
+    public const string SmtpPort = "POS_CLOUD_SMTP_PORT";
+    public const string SmtpTls = "POS_CLOUD_SMTP_TLS";
+    public const string SmtpUser = "POS_CLOUD_SMTP_USER";
+    public const string SmtpPassword = "POS_CLOUD_SMTP_PASSWORD";
+    public const string DataKeys = "POS_CLOUD_DATA_KEYS";
     public const int MinCertificatePasswordLength = 12;
     private static readonly TimeSpan s_certificateExpiryWarning = TimeSpan.FromDays(30);
 
@@ -77,8 +85,9 @@ internal static class CloudSettings
     }
 
     /// <summary>
-    /// User authentication: the public origin of the dashboard (links in emails, CSRF origin check) and the mail
-    /// pickup directory. Both are required: a misconfigured host must not run with half-working account recovery.
+    /// User authentication: the public origin of the dashboard (links in emails, CSRF origin check), the mail
+    /// transport and the data-protection keys. All are required: a misconfigured host must not run with
+    /// half-working account recovery or unreadable MFA secrets.
     /// </summary>
     public static AuthSettings? LoadAuth(Func<string, string?> environment, List<string> errors)
     {
@@ -100,32 +109,125 @@ internal static class CloudSettings
             origin = uri.GetLeftPart(UriPartial.Authority);
         }
 
-        string? mail = null;
-        var mailValue = environment(MailDirectory);
-        if (string.IsNullOrWhiteSpace(mailValue))
+        var mail = LoadMail(environment, errors);
+        var keys = SecretKeyRing.Parse(environment(DataKeys), DataKeys, errors);
+        return origin is null || mail is null || keys is null ? null : new AuthSettings(origin, mail, keys);
+    }
+
+    /// <summary>
+    /// Exactly one mail transport: <c>POS_CLOUD_MAIL_DIR</c> (pickup directory: development, or a local relay agent)
+    /// or <c>POS_CLOUD_SMTP_HOST</c> (SMTP relay, STARTTLS by default). Credentials are checked for presence and
+    /// shape only, and never echoed.
+    /// </summary>
+    private static MailSettings? LoadMail(Func<string, string?> environment, List<string> errors)
+    {
+        var directory = environment(MailDirectory);
+        var host = environment(SmtpHost);
+        var hasDirectory = !string.IsNullOrWhiteSpace(directory);
+        var hasHost = !string.IsNullOrWhiteSpace(host);
+        if (hasDirectory == hasHost)
         {
-            errors.Add($"{MailDirectory} : variable d'environnement requise (dossier de dépôt des e-mails de sécurité).");
+            errors.Add(hasDirectory
+                ? $"{MailDirectory} et {SmtpHost} : choisissez un seul transport (dossier de dépôt OU relais SMTP)."
+                : $"{MailDirectory} ou {SmtpHost} : un transport d'e-mails de sécurité est requis (dossier de dépôt ou relais SMTP).");
+            return null;
         }
-        else if (!Path.IsPathFullyQualified(mailValue) || !Directory.Exists(mailValue))
+
+        var before = errors.Count;
+        var fromValue = environment(MailFrom);
+        string from = MailSettings.DefaultFrom;
+        if (!string.IsNullOrWhiteSpace(fromValue))
         {
-            errors.Add($"{MailDirectory} : dossier absolu existant requis.");
+            if (fromValue.Any(char.IsControl) || !TryMailAddress(fromValue))
+            {
+                errors.Add($"{MailFrom} : adresse d'expéditeur invalide.");
+            }
+            else
+            {
+                from = fromValue;
+            }
         }
-        else
+        else if (hasHost)
         {
-            var probe = Path.Combine(mailValue, $".write-test-{Guid.NewGuid():N}");
+            errors.Add($"{MailFrom} : expéditeur requis avec un relais SMTP (adresse d'un domaine que le relais est autorisé à signer).");
+        }
+
+        if (hasDirectory)
+        {
+            if (!Path.IsPathFullyQualified(directory!) || !Directory.Exists(directory))
+            {
+                errors.Add($"{MailDirectory} : dossier absolu existant requis.");
+                return null;
+            }
+
+            var probe = Path.Combine(directory!, $".write-test-{Guid.NewGuid():N}");
             try
             {
                 File.WriteAllBytes(probe, []);
                 File.Delete(probe);
-                mail = mailValue;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 errors.Add($"{MailDirectory} : dossier non accessible en écriture.");
             }
+
+            return errors.Count > before ? null : new MailSettings(from, directory, null);
         }
 
-        return origin is null || mail is null ? null : new AuthSettings(origin, mail);
+        host = host!.Trim();
+        var loopback = host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || (IPAddress.TryParse(host, out var ip) && IPAddress.IsLoopback(ip));
+        if (Uri.CheckHostName(host) == UriHostNameType.Unknown)
+        {
+            errors.Add($"{SmtpHost} : nom d'hôte ou adresse IP invalide.");
+        }
+
+        var port = 587;
+        var portValue = environment(SmtpPort);
+        if (!string.IsNullOrWhiteSpace(portValue) && (!int.TryParse(portValue, NumberStyles.None, CultureInfo.InvariantCulture, out port) || port is < 1 or > 65535))
+        {
+            errors.Add($"{SmtpPort} : port entre 1 et 65535 attendu.");
+        }
+        else if (port == 465)
+        {
+            errors.Add($"{SmtpPort} : 465 (TLS implicite) n'est pas pris en charge ; utilisez la soumission STARTTLS (587).");
+        }
+
+        var tls = environment(SmtpTls)?.Trim().ToLowerInvariant() ?? "starttls";
+        if (tls is not ("starttls" or "none"))
+        {
+            errors.Add($"{SmtpTls} : « starttls » (défaut) ou « none » attendu.");
+        }
+        else if (tls == "none" && !loopback)
+        {
+            errors.Add($"{SmtpTls} : « none » n'est autorisé que vers un relais local (localhost / 127.0.0.1) ; les liens à usage unique ne doivent pas circuler en clair.");
+        }
+
+        var user = environment(SmtpUser);
+        var password = environment(SmtpPassword);
+        if (string.IsNullOrEmpty(user) != string.IsNullOrEmpty(password))
+        {
+            errors.Add($"{SmtpUser} et {SmtpPassword} : à définir ensemble (ou aucun des deux).");
+        }
+        else if (!string.IsNullOrEmpty(user) && (user.Any(char.IsControl) || password!.Any(char.IsControl)))
+        {
+            errors.Add($"{SmtpUser} / {SmtpPassword} : caractères de contrôle interdits.");
+        }
+
+        return errors.Count > before ? null
+            : new MailSettings(from, null, new SmtpSettings(host, port, tls == "starttls", string.IsNullOrEmpty(user) ? null : user, string.IsNullOrEmpty(user) ? null : password));
+    }
+
+    private static bool TryMailAddress(string value)
+    {
+        try
+        {
+            _ = new System.Net.Mail.MailAddress(value);
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 
     private static string? ValidateConnectionString(string? runtime, string? migration, List<string> errors, List<string> warnings)

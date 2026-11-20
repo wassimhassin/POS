@@ -51,6 +51,12 @@ public sealed partial class GatewayClient : IAsyncDisposable
 {
     private const int MaxNotices = 20;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+
+    // Enrollment is a one-off interactive step whose first request (TLS, cold gateway) can be slow on a loaded
+    // machine: a longer per-attempt timeout, and transport failures are retried. Retrying is safe because the
+    // gateway repeats an enrollment for the same terminal identity and key (a lost reply never burns the code).
+    private static readonly TimeSpan EnrollAttemptTimeout = TimeSpan.FromSeconds(15);
+    private const int EnrollAttempts = 3;
     private static readonly TimeSpan[] ReconnectDelays = [TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)];
 
     private readonly TerminalStore _store;
@@ -132,20 +138,31 @@ public sealed partial class GatewayClient : IAsyncDisposable
         var request = new EnrollRequest(code, terminalId, Convert.ToBase64String(publicKey),
             Convert.ToBase64String(_store.Sign(GatewayProtocol.EnrollPayload(terminalId, code, pin))));
 
-        using var http = CreateHttpClient(baseUri, pin);
-        HttpResponseMessage response;
-        try
+        using var http = CreateHttpClient(baseUri, pin, Timeout.InfiniteTimeSpan);
+        HttpResponseMessage? response = null;
+        for (var attempt = 1; response is null; attempt++)
         {
-            response = await http.PostAsJsonAsync("v1/enroll", request, GatewayProtocol.Json, cancellationToken).ConfigureAwait(false);
-        }
-        catch (HttpRequestException ex) when (ex.InnerException is AuthenticationException)
-        {
-            throw new PosValidationException("certificate_mismatch",
-                "Le certificat présenté ne correspond pas à l'empreinte saisie. Vérifiez l'empreinte : ce n'est peut-être pas votre passerelle.");
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-        {
-            throw new PosValidationException("gateway_unavailable", $"Passerelle injoignable à {baseUri}: {ex.Message}");
+            using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attemptTimeout.CancelAfter(EnrollAttemptTimeout);
+            try
+            {
+                response = await http.PostAsJsonAsync("v1/enroll", request, GatewayProtocol.Json, attemptTimeout.Token).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex) when (ex.InnerException is AuthenticationException)
+            {
+                throw new PosValidationException("certificate_mismatch",
+                    "Le certificat présenté ne correspond pas à l'empreinte saisie. Vérifiez l'empreinte : ce n'est peut-être pas votre passerelle.");
+            }
+            catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !cancellationToken.IsCancellationRequested)
+            {
+                LogEnrollRetry(_logger, attempt, ex.GetType().Name);
+                if (attempt >= EnrollAttempts)
+                {
+                    throw new PosValidationException("gateway_unavailable", $"Passerelle injoignable à {baseUri}: {ex.Message}");
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            }
         }
 
         using (response)
@@ -538,7 +555,7 @@ public sealed partial class GatewayClient : IAsyncDisposable
         .WithKeepAliveInterval(TimeSpan.FromSeconds(5))
         .Build();
 
-    private static HttpClient CreateHttpClient(Uri baseUri, string pinnedSha256) => new(new SocketsHttpHandler
+    private static HttpClient CreateHttpClient(Uri baseUri, string pinnedSha256, TimeSpan? timeout = null) => new(new SocketsHttpHandler
     {
         ConnectTimeout = TimeSpan.FromSeconds(3),
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
@@ -546,7 +563,7 @@ public sealed partial class GatewayClient : IAsyncDisposable
     })
     {
         BaseAddress = baseUri,
-        Timeout = RequestTimeout,
+        Timeout = timeout ?? RequestTimeout,
     };
 
     /// <summary>Accepts exactly the enrolled gateway certificate (self-signed, so chain and name are not used).</summary>
@@ -676,6 +693,9 @@ public sealed partial class GatewayClient : IAsyncDisposable
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Pending operation abandoned at unpair: {OperationId} ({OperationType}) {Description}")]
     private static partial void LogPendingAbandoned(ILogger logger, string operationId, string operationType, string description);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Enrollment attempt {Attempt} got no reply ({Failure}); retrying with the same signed request")]
+    private static partial void LogEnrollRetry(ILogger logger, int attempt, string failure);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Terminal {TerminalId} enrolled as {TerminalName} in branch {BranchName} via {GatewayUrl}")]
     private static partial void LogEnrolled(ILogger logger, string terminalId, string terminalName, string branchName, Uri gatewayUrl);
