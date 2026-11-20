@@ -141,7 +141,7 @@ names the table, never a credential.
 ## 9. Limitations (honest)
 
 1. **One role and one scope per membership.** A manager of two branches needs a business scope or two organizations. A multi-assignment table can come later without changing the permission checks.
-2. **No PostgreSQL RLS yet.** Isolation is application-level: the filter, scoped queries and composite keys. RLS on `pos_app` remains planned (ADR-003).
+2. **PostgreSQL RLS** was added in Phase 2.1E ([doc 15](15-CLOUD-ROW-LEVEL-SECURITY.md)) under the application-level filter, scoped queries and composite keys.
 3. **Business- or branch-scoped administrators do not exist.** Only owners and admins can invite or manage, and both are organization-wide. Rules for managers who invite inside their branch are implemented in the checks but not exposed by any role yet.
 4. **Admins cannot leave on their own.** An owner revokes them; there is no "leave organization" endpoint.
 5. **Invitation mails are queued in memory** (ADR-021). An invitation lost in a crash must be re-sent, which supersedes the old one.

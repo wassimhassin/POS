@@ -352,3 +352,18 @@ See [docs/13-SECURITY-RELIABILITY-HARDENING.md](docs/13-SECURITY-RELIABILITY-HAR
 - **Audit:** every access change is recorded with actor, target and ids, never addresses or tokens.
 
 See [docs/14-CLOUD-ACCESS-CONTROL.md](docs/14-CLOUD-ACCESS-CONTROL.md).
+
+## Cloud tenant isolation in PostgreSQL (Phase 2.1E)
+
+- **Row-level security** on every organization-owned table.
+  - The service sees and writes a tenant's rows only inside a transaction bound to that tenant.
+  - The tenant comes from the authenticated gateway, report key, membership or invitation, never from the request.
+  - Without a tenant, the service sees nothing.
+- **Narrow lookups:** a few privileged functions authenticate before a tenant is known. Each returns one row.
+- **Platform role:** provisioning commands run with a separate role (`POS_CLOUD_ADMIN_DB`, defaulting to the schema
+  owner), and every command is audited.
+- **Deployment:**
+  - The deploy grant gains `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app`.
+  - `check-config` verifies the policies, role attributes, grants and an end-to-end probe.
+
+See [docs/15-CLOUD-ROW-LEVEL-SECURITY.md](docs/15-CLOUD-ROW-LEVEL-SECURITY.md).

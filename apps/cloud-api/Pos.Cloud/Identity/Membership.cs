@@ -68,7 +68,7 @@ public sealed partial class MembershipService(
             query = query.Where(b => b.BusinessId == business);
         }
 
-        var rows = await query.OrderBy(b => b.Name).ThenBy(b => b.Id).ToListAsync(ct);
+        var rows = await db.InTenantAsync(member.OrganizationId, () => query.OrderBy(b => b.Name).ThenBy(b => b.Id).ToListAsync(ct), ct);
         return [.. rows.Select(b => new BranchInfo(b.Id.ToString("D"), b.BusinessId.ToString("D"), b.Name))];
     }
 
@@ -76,11 +76,11 @@ public sealed partial class MembershipService(
     {
         ArgumentNullException.ThrowIfNull(member);
         var memberships = Within(db.OrganizationMemberships.AsNoTracking().Where(m => m.OrganizationId == member.OrganizationId && m.RevokedAt == null), member.Scope);
-        var rows = await (
+        var rows = await db.InTenantAsync(member.OrganizationId, () => (
             from m in memberships
             join u in db.Users.AsNoTracking() on m.UserId equals u.Id
             orderby m.CreatedAt, m.UserId
-            select new { Membership = m, u.Email }).ToListAsync(ct);
+            select new { Membership = m, u.Email }).ToListAsync(ct), ct);
         return [.. rows.Select(r => ToInfo(r.Membership, r.Email!))];
     }
 
@@ -99,7 +99,7 @@ public sealed partial class MembershipService(
             query = query.Where(i => i.BusinessId == business);
         }
 
-        var rows = await query.OrderBy(i => i.CreatedAt).ToListAsync(ct);
+        var rows = await db.InTenantAsync(member.OrganizationId, () => query.OrderBy(i => i.CreatedAt).ToListAsync(ct), ct);
         return [.. rows.Select(i => new InvitationInfo(i.Id.ToString("D"), i.NormalizedEmail.ToLowerInvariant(), i.Role,
             new AccessScope(i.BusinessId, i.BranchId).ToInfo(), i.InvitedBy.ToString("D"), i.CreatedAt, i.ExpiresAt))];
     }
@@ -113,9 +113,8 @@ public sealed partial class MembershipService(
         ArgumentNullException.ThrowIfNull(request);
         var address = AuthService.ValidEmail(request.Email);
         var normalized = users.NormalizeEmail(address);
+        await using var tx = await db.BeginTenantAsync(actor.OrganizationId, ct);
         var scope = await ResolveScopeAsync(actor.OrganizationId, request.Role, request.BusinessId, request.BranchId, ct);
-
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await LockOrganizationAsync(actor.OrganizationId, ct);
         var current = await ReloadAsync(actor, ct) ?? throw OrganizationAccessFilter.NotFound();
         if (!current.Has(Permissions.MembersInvite) || !CanGrant(current, request.Role, scope))
@@ -171,9 +170,9 @@ public sealed partial class MembershipService(
         AuthAudit.Add(db, time, AccessEvents.MemberInvited, http, current.UserId, current.SessionId, current.OrganizationId,
             details: $"invitation={invitation.Id:D};role={request.Role};scope={scope}");
         await db.SaveChangesAsync(ct);
+        var organization = await db.Organizations.AsNoTracking().Where(o => o.Id == actor.OrganizationId).Select(o => o.Name).SingleAsync(ct);
         await tx.CommitAsync(ct);
 
-        var organization = await db.Organizations.AsNoTracking().Where(o => o.Id == actor.OrganizationId).Select(o => o.Name).SingleAsync(ct);
         await mailer.SendAsync(address, "Invitation à rejoindre une organisation PosSaaS",
             $"Vous êtes invité(e) à rejoindre l'organisation « {organization} » sur PosSaaS (rôle : {request.Role}).\n"
             + "1. Créez votre compte avec cette adresse (ou connectez-vous) et vérifiez-la.\n2. Activez l'authentification à deux facteurs.\n"
@@ -185,7 +184,7 @@ public sealed partial class MembershipService(
     public async Task<bool> RevokeInvitationAsync(MemberAccess actor, Guid invitationId, HttpContext http, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(actor);
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await using var tx = await db.BeginTenantAsync(actor.OrganizationId, ct);
         await LockOrganizationAsync(actor.OrganizationId, ct);
         var current = await ReloadAsync(actor, ct) ?? throw OrganizationAccessFilter.NotFound();
         var now = time.GetUtcNow();
@@ -225,6 +224,10 @@ public sealed partial class MembershipService(
 
         var hash = AuthSecrets.Hash(token);
         var now = time.GetUtcNow();
+
+        // The token alone names its organization (pre-tenant lookup); everything else runs inside that tenant only.
+        var organizationId = await db.InvitationOrganizationAsync(hash, ct) ?? throw InvalidToken();
+        await using var tx = await db.BeginTenantAsync(organizationId, ct);
         var invitation = await db.MembershipInvitations.AsNoTracking()
             .SingleOrDefaultAsync(i => i.TokenHash == hash && i.AcceptedAt == null && i.RevokedAt == null && i.ExpiresAt > now, ct);
         if (invitation is null || !user.EmailConfirmed || !string.Equals(invitation.NormalizedEmail, user.NormalizedEmail, StringComparison.Ordinal))
@@ -238,7 +241,6 @@ public sealed partial class MembershipService(
         }
 
         var scope = new AccessScope(invitation.BusinessId, invitation.BranchId);
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await LockOrganizationAsync(invitation.OrganizationId, ct);
 
         // The inviter's authority is checked now, not when the link was sent: a demoted or removed inviter's links die.
@@ -308,9 +310,8 @@ public sealed partial class MembershipService(
     {
         ArgumentNullException.ThrowIfNull(actor);
         ArgumentNullException.ThrowIfNull(request);
+        await using var tx = await db.BeginTenantAsync(actor.OrganizationId, ct);
         var scope = await ResolveScopeAsync(actor.OrganizationId, request.Role, request.BusinessId, request.BranchId, ct);
-
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await LockOrganizationAsync(actor.OrganizationId, ct);
         var current = await ReloadAsync(actor, ct) ?? throw OrganizationAccessFilter.NotFound();
         var target = await TargetAsync(current, targetUserId, ct);
@@ -356,7 +357,7 @@ public sealed partial class MembershipService(
     public async Task RevokeAsync(MemberAccess actor, Guid targetUserId, HttpContext http, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(actor);
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await using var tx = await db.BeginTenantAsync(actor.OrganizationId, ct);
         await LockOrganizationAsync(actor.OrganizationId, ct);
         var current = await ReloadAsync(actor, ct) ?? throw OrganizationAccessFilter.NotFound();
         var target = await TargetAsync(current, targetUserId, ct);
@@ -484,15 +485,21 @@ public sealed partial class MembershipService(
     private async Task DeniedAsync(MemberAccess actor, HttpContext http, Guid? target, string details, CancellationToken ct)
     {
         db.ChangeTracker.Clear();
-        AuthAudit.Add(db, time, AccessEvents.PermissionDenied, http, actor.UserId, actor.SessionId, actor.OrganizationId, target, details);
-        await db.SaveChangesAsync(ct);
+        await db.InTenantAsync(actor.OrganizationId, () =>
+        {
+            AuthAudit.Add(db, time, AccessEvents.PermissionDenied, http, actor.UserId, actor.SessionId, actor.OrganizationId, target, details);
+            return db.SaveChangesAsync(ct);
+        }, ct);
     }
 
     private async Task LastOwnerAsync(MemberAccess actor, HttpContext http, Guid target, CancellationToken ct)
     {
         db.ChangeTracker.Clear();
-        AuthAudit.Add(db, time, AccessEvents.LastOwnerProtected, http, actor.UserId, actor.SessionId, actor.OrganizationId, target);
-        await db.SaveChangesAsync(ct);
+        await db.InTenantAsync(actor.OrganizationId, () =>
+        {
+            AuthAudit.Add(db, time, AccessEvents.LastOwnerProtected, http, actor.UserId, actor.SessionId, actor.OrganizationId, target);
+            return db.SaveChangesAsync(ct);
+        }, ct);
         throw new CloudException(409, AccessErrors.LastOwner, "L'organisation doit garder au moins un propriétaire actif.");
     }
 

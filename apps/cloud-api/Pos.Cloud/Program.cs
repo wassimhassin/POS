@@ -30,7 +30,9 @@ using Pos.Sync;
 //   Pos.Cloud check-config    --listen https://<ip>:<port> --certificate <file.pfx>   validates settings + database, no listener
 //   Pos.Cloud openapi         --out <file.json>                                       writes the OpenAPI document (no database)
 //
-// Runtime and admin commands use POS_CLOUD_DB (a role with data privileges only, no DDL).
+// The service, cleanup, mfa-rekey and check-config use POS_CLOUD_DB: a data-only role subject to row-level security
+// (doc 15). Platform commands (org/business/branch-create, gateway-code, gateways, gateway-revoke, report-key,
+// owner-invite) use POS_CLOUD_ADMIN_DB, or POS_CLOUD_MIGRATION_DB when unset: a role that bypasses it. Audited.
 // No secret is hard-coded: connection strings and the certificate password come from the environment.
 
 var command = args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0] : "run";
@@ -60,9 +62,10 @@ try
 
         case "org-create":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var organization = new Organization { Id = options.Id("id") ?? Guid.NewGuid(), Name = options.Name(), CreatedAt = DateTimeOffset.UtcNow };
             db.Organizations.Add(organization);
+            Cli.Audit(db, PlatformEvents.OrganizationCreated, organization.Id, $"organization={organization.Id:D}");
             await db.SaveChangesAsync();
             Console.WriteLine($"organization_id={organization.Id:D}");
             return 0;
@@ -70,7 +73,7 @@ try
 
         case "business-create":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var organizationId = options.Id("org") ?? throw new CliException("Option requise : --org");
             if (!await db.Organizations.AnyAsync(o => o.Id == organizationId))
             {
@@ -79,6 +82,7 @@ try
 
             var business = new Business { OrganizationId = organizationId, Id = options.Id("id") ?? Guid.NewGuid(), Name = options.Name(), CreatedAt = DateTimeOffset.UtcNow };
             db.Businesses.Add(business);
+            Cli.Audit(db, PlatformEvents.BusinessCreated, organizationId, $"business={business.Id:D}");
             await db.SaveChangesAsync();
             Console.WriteLine($"business_id={business.Id:D}");
             return 0;
@@ -86,13 +90,14 @@ try
 
         case "branch-create":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var businessId = options.Id("business") ?? throw new CliException("Option requise : --business");
             var business = await db.Businesses.SingleOrDefaultAsync(b => b.Id == businessId) ?? throw new CliException("Entreprise introuvable.");
             // --id: reuse the branch id an existing gateway was initialized with (stable association, no re-init).
             var branch = new Branch { OrganizationId = business.OrganizationId, BusinessId = business.Id, Id = options.Id("id") ?? Guid.NewGuid(), Name = options.Name(), CreatedAt = DateTimeOffset.UtcNow };
             db.Branches.Add(branch);
             db.BranchSyncStates.Add(new BranchSyncState { OrganizationId = branch.OrganizationId, BusinessId = branch.BusinessId, BranchId = branch.Id });
+            Cli.Audit(db, PlatformEvents.BranchCreated, branch.OrganizationId, $"branch={branch.Id:D};business={branch.BusinessId:D}");
             await db.SaveChangesAsync();
             Console.WriteLine($"branch_id={branch.Id:D}");
             return 0;
@@ -100,7 +105,7 @@ try
 
         case "gateway-code":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var branchId = options.Id("branch") ?? throw new CliException("Option requise : --branch");
             var branch = await db.Branches.SingleOrDefaultAsync(b => b.Id == branchId) ?? throw new CliException("Succursale introuvable.");
             var minutes = Math.Clamp(int.Parse(options.One("minutes") ?? "15", CultureInfo.InvariantCulture), 1, 60);
@@ -116,6 +121,7 @@ try
                 ExpiresAt = expiresAt,
                 ReplacesActive = options.Has("replace"),
             });
+            Cli.Audit(db, PlatformEvents.GatewayCodeIssued, branch.OrganizationId, $"branch={branch.Id:D};replace={(options.Has("replace") ? 1 : 0)};minutes={minutes}");
             await db.SaveChangesAsync();
             Console.WriteLine($"code={code}");
             Console.WriteLine($"expires_at={expiresAt:O}");
@@ -125,7 +131,7 @@ try
 
         case "gateways":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var branchId = options.Id("branch");
             foreach (var g in await db.GatewayCredentials.Where(g => branchId == null || g.BranchId == branchId).OrderBy(g => g.RegisteredAt).ToListAsync())
             {
@@ -137,17 +143,23 @@ try
 
         case "gateway-revoke":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var gatewayId = options.Id("gateway") ?? throw new CliException("Option requise : --gateway");
-            var revoked = await db.GatewayCredentials.Where(g => g.Id == gatewayId && g.RevokedAt == null)
-                .ExecuteUpdateAsync(s => s.SetProperty(g => g.RevokedAt, DateTimeOffset.UtcNow));
-            Console.WriteLine(revoked == 1 ? "revoked=1" : "revoked=0");
-            return revoked == 1 ? 0 : 1;
+            var gateway = await db.GatewayCredentials.SingleOrDefaultAsync(g => g.Id == gatewayId && g.RevokedAt == null);
+            if (gateway is not null)
+            {
+                gateway.RevokedAt = DateTimeOffset.UtcNow;
+                Cli.Audit(db, PlatformEvents.GatewayRevoked, gateway.OrganizationId, $"gateway={gateway.Id:D};branch={gateway.BranchId:D}");
+                await db.SaveChangesAsync();
+            }
+
+            Console.WriteLine(gateway is not null ? "revoked=1" : "revoked=0");
+            return gateway is not null ? 0 : 1;
         }
 
         case "report-key":
         {
-            await using var db = Cli.Db();
+            await using var db = await Cli.PlatformDbAsync();
             var organizationId = options.Id("org") ?? throw new CliException("Option requise : --org");
             var businessId = options.Id("business");
             var branchId = options.Id("branch");
@@ -162,6 +174,7 @@ try
 
             var (key, token) = ReportKeyHandler.Create(organizationId, businessId, branchId, options.Name(), DateTimeOffset.UtcNow);
             db.ReportKeys.Add(key);
+            Cli.Audit(db, PlatformEvents.ReportKeyCreated, organizationId, $"key={key.Id:D};scope={new Pos.Cloud.Identity.AccessScope(businessId, branchId)}");
             await db.SaveChangesAsync();
             Console.WriteLine($"report_key={token}");
             return 0;
@@ -189,7 +202,8 @@ try
             var email = options.Required("email");
             var problems = new List<string>();
             var auth = CloudSettings.LoadAuth(Environment.GetEnvironmentVariable, problems) ?? throw new CliException(string.Join(" ", problems));
-            await using var app = CloudHost.Build(Cli.ConnectionString(CloudSettings.RuntimeDb), auth, loggerFactory, kestrel: null, backgroundMail: false);
+            await (await Cli.PlatformDbAsync()).DisposeAsync(); // checks the platform role before anything is sent
+            await using var app = CloudHost.Build(Cli.ConnectionString(Cli.PlatformVariable), auth, loggerFactory, kestrel: null, backgroundMail: false);
             await using var scope = app.Services.CreateAsyncScope();
             var expires = await scope.ServiceProvider.GetRequiredService<Pos.Cloud.Identity.AuthService>().InviteOwnerAsync(organizationId, email, CancellationToken.None);
             Console.WriteLine("invite=sent");
@@ -366,6 +380,11 @@ static async Task<int> CheckConfigAsync(Cli options, ILogger log)
 
         if (pending.Count == 0)
         {
+            errors.AddRange(await RowLevelSecurity.CheckAsync(db));
+        }
+
+        if (pending.Count == 0)
+        {
             // MFA seeds: every one must be readable with the configured keys; legacy or old-key rows need mfa-rekey.
             var keys = settings.Auth.Keys;
             var configured = keys.KeyIds.ToList();
@@ -387,7 +406,8 @@ static async Task<int> CheckConfigAsync(Cli options, ILogger log)
     catch (Exception ex) when (ex is Npgsql.NpgsqlException or InvalidOperationException or TimeoutException)
     {
         // The provider's message can name the host and user; the cause class is enough to act on.
-        errors.Add($"{CloudSettings.RuntimeDb} : connexion impossible ({ex.GetType().Name}).");
+        // SQLSTATE is safe to show (a code, never a value) and tells a privilege error from a network one.
+        errors.Add($"{CloudSettings.RuntimeDb} : connexion impossible ({ex.GetType().Name}{(ex is Npgsql.PostgresException pg ? " " + pg.SqlState : "")}).");
     }
 
     if (errors.Count > 0)
@@ -514,6 +534,41 @@ internal sealed class Cli
 
     public static CloudDb Db(string variable = "POS_CLOUD_DB") =>
         new(new DbContextOptionsBuilder<CloudDb>().UseNpgsql(ConnectionString(variable)).Options);
+
+    /// <summary>The platform-operations connection: POS_CLOUD_ADMIN_DB, else the schema owner's POS_CLOUD_MIGRATION_DB.</summary>
+    public static string PlatformVariable =>
+        Environment.GetEnvironmentVariable(CloudSettings.AdminDb) is { Length: > 0 } ? CloudSettings.AdminDb : CloudSettings.MigrationDb;
+
+    /// <summary>
+    /// Opens the platform connection and verifies its role is exempt from row-level security (superuser, BYPASSRLS or
+    /// owner of the tables): the runtime role sees no tenant data outside a tenant transaction, so it cannot provision.
+    /// </summary>
+    public static async Task<CloudDb> PlatformDbAsync()
+    {
+        var variable = PlatformVariable;
+        var db = Db(variable);
+        try
+        {
+            var exempt = await db.Database.SqlQueryRaw<bool>(
+                "SELECT (r.rolsuper OR r.rolbypassrls OR pg_has_role(current_user, c.relowner, 'USAGE')) AS \"Value\" " +
+                "FROM pg_roles r, pg_class c WHERE r.rolname = current_user AND c.oid = 'public.organizations'::regclass").SingleAsync();
+            if (!exempt)
+            {
+                throw new CliException($"{variable} : opération de plateforme refusée ; ce rôle est soumis à la sécurité par ligne (utilisez le propriétaire du schéma ou un rôle BYPASSRLS dédié).");
+            }
+
+            return db;
+        }
+        catch
+        {
+            await db.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>Records a platform (operator) action on a tenant in the security log: ids only, never codes, keys or addresses.</summary>
+    public static void Audit(CloudDb db, string auditEvent, Guid organizationId, string details) =>
+        Pos.Cloud.Identity.AuthAudit.Add(db, TimeProvider.System, auditEvent, null, null, organizationId: organizationId, details: details);
 
     public static string CertificatePassword() =>
         Environment.GetEnvironmentVariable("POS_CLOUD_CERT_PASSWORD") is { Length: >= 12 } value

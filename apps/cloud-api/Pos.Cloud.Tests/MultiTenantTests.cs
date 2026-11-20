@@ -156,14 +156,17 @@ public sealed class MultiTenantTests : IAsyncLifetime
         await using var connection = new NpgsqlConnection(PostgresCluster.Instance.AppConnection(_cloud.Database));
         await connection.OpenAsync();
 
-        // A branch of business A1 claimed by organization B, or by business A2: composite foreign keys refuse it.
+        // A branch of business A1 claimed by organization B, or by business A2: composite foreign keys refuse it. Each
+        // insert runs inside the claimed organization's tenant context, so row-level security lets it reach the keys.
         foreach (var (organization, business) in new[] { (_orgB, _a1), (_orgA, _a2) })
         {
+            await using var tx = await connection.BeginTransactionAsync();
+            await EnterTenantAsync(connection, tx, organization);
             await using var insert = new NpgsqlCommand("""
                 INSERT INTO orders (organization_id, business_id, branch_id, id, number, status, version, currency, item_count, total_minor,
                                     created_by_name, updated_by_name, created_at, updated_at, last_sequence)
                 VALUES (@o, @b, @br, gen_random_uuid(), 1, 'open', 1, 'TND', 0, 0, 'x', 'x', now(), now(), 1);
-                """, connection);
+                """, connection, tx);
             insert.Parameters.AddWithValue("o", organization);
             insert.Parameters.AddWithValue("b", business);
             insert.Parameters.AddWithValue("br", branchA);
@@ -172,11 +175,20 @@ public sealed class MultiTenantTests : IAsyncLifetime
         }
 
         // A business attached to another organization's business key, likewise.
+        await using var branchTx = await connection.BeginTransactionAsync();
+        await EnterTenantAsync(connection, branchTx, _orgB);
         await using var branchInsert = new NpgsqlCommand(
-            "INSERT INTO branches (organization_id, business_id, id, name, created_at) VALUES (@o, @b, gen_random_uuid(), 'x', now());", connection);
+            "INSERT INTO branches (organization_id, business_id, id, name, created_at) VALUES (@o, @b, gen_random_uuid(), 'x', now());", connection, branchTx);
         branchInsert.Parameters.AddWithValue("o", _orgB);
         branchInsert.Parameters.AddWithValue("b", _a1);
         Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, (await Assert.ThrowsAsync<PostgresException>(() => branchInsert.ExecuteNonQueryAsync())).SqlState);
+    }
+
+    private static async Task EnterTenantAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid organization)
+    {
+        await using var enter = new NpgsqlCommand("SELECT app_enter_tenant(@o)", connection, tx);
+        enter.Parameters.AddWithValue("o", organization);
+        await enter.ExecuteNonQueryAsync();
     }
 
     private async Task AssertVisible(string key, string[] visible, string[] hidden)

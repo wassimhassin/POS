@@ -53,7 +53,8 @@ public sealed partial class SyncService(CloudDb db, TimeProvider time, ILogger<S
     {
         ValidateBatchShape(batch);
         var now = time.GetUtcNow();
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // Tenant transaction of the credential's organization: row-level security limits every statement below to it.
+        await using var tx = await db.BeginTenantAsync(gateway.OrganizationId, ct);
 
         var state = await db.BranchSyncStates
             .FromSql($"SELECT * FROM branch_sync_states WHERE branch_id = {gateway.BranchId} FOR UPDATE")

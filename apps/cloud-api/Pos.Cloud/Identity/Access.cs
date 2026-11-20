@@ -109,14 +109,15 @@ public sealed class OrganizationAccess(CloudDb db)
     public async Task<MemberAccess?> EvaluateAsync(UserPrincipal principal, Guid organizationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(principal);
-        var row = await (
-            from m in db.OrganizationMemberships.AsNoTracking()
-            join u in db.Users.AsNoTracking() on m.UserId equals u.Id
-            where m.OrganizationId == organizationId && m.UserId == principal.UserId && m.RevokedAt == null && u.EmailConfirmed
-            select new { m.Role, m.BusinessId, m.BranchId, m.Version }).SingleOrDefaultAsync(ct);
-        return row is null || !MembershipRoles.IsKnown(row.Role)
-            ? null
-            : new MemberAccess(organizationId, principal.UserId, principal.SessionId, row.Role, new AccessScope(row.BusinessId, row.BranchId), row.Version);
+        // The caller's own memberships (pre-tenant lookup by the session's user id): the tenant context is entered
+        // only after this proves membership, so a path naming another organization never opens its rows.
+        var row = (await db.UserMembershipsAsync(principal.UserId, ct)).SingleOrDefault(m => m.OrganizationId == organizationId);
+        if (row is null || !MembershipRoles.IsKnown(row.Role) || !await db.Users.AsNoTracking().AnyAsync(u => u.Id == principal.UserId && u.EmailConfirmed, ct))
+        {
+            return null;
+        }
+
+        return new MemberAccess(organizationId, principal.UserId, principal.SessionId, row.Role, new AccessScope(row.BusinessId, row.BranchId), row.Version);
     }
 }
 
@@ -151,8 +152,11 @@ public sealed partial class OrganizationAccessFilter(OrganizationAccess access, 
         {
             if (required.Permission is Permissions.MembersInvite or Permissions.MembersManage)
             {
-                AuthAudit.Add(db, time, AccessEvents.PermissionDenied, http, member.UserId, member.SessionId, organizationId, details: $"permission={required.Permission}");
-                await db.SaveChangesAsync(http.RequestAborted);
+                await db.InTenantAsync(organizationId, () =>
+                {
+                    AuthAudit.Add(db, time, AccessEvents.PermissionDenied, http, member.UserId, member.SessionId, organizationId, details: $"permission={required.Permission}");
+                    return db.SaveChangesAsync(http.RequestAborted);
+                }, http.RequestAborted);
             }
 
             throw Forbidden();

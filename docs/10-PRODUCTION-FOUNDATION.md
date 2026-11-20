@@ -326,7 +326,7 @@ API conventions in code, OpenAPI, RLS and CI. Suggested first slice inside 2.1:
 Phase 2.1A (CI, error envelope, `/v1` group, OpenAPI, configuration validation) is done: see
 [11-CI-AND-API-FOUNDATIONS.md](11-CI-AND-API-FOUNDATIONS.md). Phase 2.1B (cloud user authentication: Identity,
 sessions, MFA, password reset, invitation-only owner onboarding, audit) is done: see
-[12-CLOUD-AUTHENTICATION.md](12-CLOUD-AUTHENTICATION.md). RBAC, branch scopes and the membership API: Phase 2.1D, [14-CLOUD-ACCESS-CONTROL.md](14-CLOUD-ACCESS-CONTROL.md). RLS and the organization/business/branch management API remain.
+[12-CLOUD-AUTHENTICATION.md](12-CLOUD-AUTHENTICATION.md). RBAC, branch scopes and the membership API: Phase 2.1D, [14-CLOUD-ACCESS-CONTROL.md](14-CLOUD-ACCESS-CONTROL.md). RLS: Phase 2.1E, [15-CLOUD-ROW-LEVEL-SECURITY.md](15-CLOUD-ROW-LEVEL-SECURITY.md). The organization/business/branch management API remains.
 
 ---
 

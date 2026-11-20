@@ -45,7 +45,8 @@ public sealed partial class GatewaySignatureHandler(
             return Fail("stale");
         }
 
-        var credential = await db.GatewayCredentials.AsNoTracking().SingleOrDefaultAsync(g => g.Id == gatewayId, Context.RequestAborted);
+        // Before the tenant is known: a narrow lookup of this one credential (row-level security hides every table row).
+        var credential = await db.GatewayCredentialAsync(gatewayId, Context.RequestAborted);
         if (credential is null)
         {
             return Fail("unknown gateway");
@@ -65,16 +66,16 @@ public sealed partial class GatewaySignatureHandler(
             return Fail("bad signature");
         }
 
-        if (credential.RevokedAt is not null)
+        if (credential.Revoked)
         {
             // Told only to the holder of the private key (signature verified above): the gateway fences itself.
             Context.Items[RevokedMarker] = true;
             return Fail("revoked gateway");
         }
 
-        var principal = new GatewayPrincipal(credential.Id, credential.OrganizationId, credential.BusinessId, credential.BranchId);
+        var principal = new GatewayPrincipal(gatewayId, credential.OrganizationId, credential.BusinessId, credential.BranchId);
         Context.Items[typeof(GatewayPrincipal)] = principal;
-        var identity = new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, credential.Id.ToString())], SyncProtocol.GatewayScheme);
+        var identity = new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, gatewayId.ToString())], SyncProtocol.GatewayScheme);
         return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), SyncProtocol.GatewayScheme));
     }
 
@@ -130,15 +131,15 @@ public sealed partial class ReportKeyHandler(
             return Fail("malformed");
         }
 
-        var key = await db.ReportKeys.AsNoTracking().SingleOrDefaultAsync(k => k.Id == keyId, Context.RequestAborted);
-        if (key is null || key.RevokedAt is not null
+        var key = await db.ReportKeyAsync(keyId, Context.RequestAborted); // pre-tenant lookup of this one key
+        if (key is null || key.Revoked
             || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(SyncProtocol.Sha256Hex(Encoding.ASCII.GetBytes(parts[2]))), Encoding.ASCII.GetBytes(key.SecretSha256)))
         {
             return Fail("invalid key");
         }
 
-        Context.Items[typeof(ReportPrincipal)] = new ReportPrincipal(key.Id, key.OrganizationId, key.BusinessId, key.BranchId);
-        var identity = new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, key.Id.ToString())], SyncProtocol.ReportScheme);
+        Context.Items[typeof(ReportPrincipal)] = new ReportPrincipal(keyId, key.OrganizationId, key.BusinessId, key.BranchId);
+        var identity = new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, keyId.ToString())], SyncProtocol.ReportScheme);
         return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), SyncProtocol.ReportScheme));
     }
 
@@ -224,7 +225,9 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
 
         var now = time.GetUtcNow();
         var hash = HashCode(request.Code);
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // The code alone says which organization it belongs to; everything after runs inside that tenant only.
+        var organizationId = await db.ProvisioningCodeOrganizationAsync(hash, ct) ?? throw Invalid();
+        await using var tx = await db.BeginTenantAsync(organizationId, ct);
         var code = await db.ProvisioningCodes.FromSql($"SELECT * FROM provisioning_codes WHERE code_hash = {hash} FOR UPDATE").SingleOrDefaultAsync(ct);
         var fingerprint = SyncProtocol.Sha256Hex(publicKey);
         if (code is { UsedAt: { } usedAt, UsedByGatewayId: { } usedBy })
@@ -238,9 +241,10 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
                 throw Invalid();
             }
 
+            var replayed = await ResponseAsync(previous.Id, code, ct);
             await tx.CommitAsync(ct);
             LogReplayed(logger, previous.Id, branchId);
-            return await ResponseAsync(previous.Id, code, ct);
+            return replayed;
         }
 
         if (code is null || code.UsedAt is not null || code.ExpiresAt <= now)
@@ -268,9 +272,11 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
         {
             previous.RevokedAt = now;
             LogReplaced(logger, previous.Id, branchId);
+            Identity.AuthAudit.Add(db, time, PlatformEvents.GatewayReplaced, null, null, organizationId: code.OrganizationId, details: $"gateway={previous.Id:D};branch={branchId:D}");
         }
 
-        if (await db.GatewayCredentials.AnyAsync(g => g.PublicKeySha256 == fingerprint, ct))
+        // Keys are unique across ALL tenants: asked through a yes/no lookup, never by reading other tenants' rows.
+        if (await db.GatewayKeyRegisteredAsync(fingerprint, ct))
         {
             throw new CloudException(409, "key_already_registered", "Cette clé est déjà enregistrée.");
         }
@@ -288,10 +294,13 @@ public sealed partial class GatewayRegistration(CloudDb db, TimeProvider time, I
         db.GatewayCredentials.Add(credential);
         code.UsedAt = now;
         code.UsedByGatewayId = credential.Id;
+        Identity.AuthAudit.Add(db, time, PlatformEvents.GatewayRegistered, null, null, organizationId: code.OrganizationId,
+            details: $"gateway={credential.Id:D};branch={branchId:D};replaced={active.Count}");
         await db.SaveChangesAsync(ct);
+        var response = await ResponseAsync(credential.Id, code, ct);
         await tx.CommitAsync(ct);
         LogRegistered(logger, credential.Id, branchId, code.BusinessId, code.OrganizationId);
-        return await ResponseAsync(credential.Id, code, ct);
+        return response;
     }
 
     private async Task<RegisterGatewayResponse> ResponseAsync(Guid gatewayId, ProvisioningCode code, CancellationToken ct)

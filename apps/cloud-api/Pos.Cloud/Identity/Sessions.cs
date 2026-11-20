@@ -207,7 +207,7 @@ public sealed partial class SessionHandler(
     private async Task<string> FullStateAsync(Guid userId)
     {
         var ct = Context.RequestAborted;
-        var privileged = await db.OrganizationMemberships.AnyAsync(m => m.UserId == userId && m.RevokedAt == null, ct);
+        var privileged = (await db.UserMembershipsAsync(userId, ct)).Count > 0;
         if (!privileged)
         {
             return MfaStates.Ok;

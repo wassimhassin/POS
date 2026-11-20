@@ -62,7 +62,7 @@ public static class CloudApi
             var gateway = Gateway(http);
             var state = await db.BranchSyncStates.AsNoTracking().SingleAsync(s => s.BranchId == gateway.BranchId && s.OrganizationId == gateway.OrganizationId, ct);
             return Results.Ok(new SyncCloudState(state.LastSequence));
-        }).RequireAuthorization(GatewayPolicy)
+        }).RequireAuthorization(GatewayPolicy).InTenantOf(http => Gateway(http).OrganizationId)
             .WithName("GetSyncState").WithTags("Sync")
             .WithSummary("Last sequence the cloud confirmed for the authenticated gateway's branch.")
             .Produces<SyncCloudState>()
@@ -81,7 +81,7 @@ public static class CloudApi
                 .Where(e => e.BranchId == gateway.BranchId && e.OrganizationId == gateway.OrganizationId && e.Sequence > after)
                 .OrderBy(e => e.Sequence).Take(limit ?? SyncProtocol.MaxBatchEvents).Select(e => e.Payload).ToListAsync(ct);
             return Results.Ok(new SyncEventPage(state.LastSequence, [.. rows.Select(p => JsonSerializer.Deserialize<SyncEvent>(p, SyncProtocol.Json)!)]));
-        }).RequireAuthorization(GatewayPolicy)
+        }).RequireAuthorization(GatewayPolicy).InTenantOf(http => Gateway(http).OrganizationId)
             .WithName("ListSyncEvents").WithTags("Sync")
             .WithSummary("Confirmed events of the authenticated gateway's branch after a sequence (recovery).")
             .Produces<SyncEventPage>()
@@ -91,7 +91,9 @@ public static class CloudApi
         AuthApi.Map(v1);
         MembershipApi.Map(v1); // organization access (roles, scopes, memberships): deny by default
 
-        var reports = v1.MapGroup("/reports").RequireAuthorization(ReportPolicy).WithTags("Reports").ProducesErrors(404);
+        // Every report runs inside the key's organization: other tenants' rows are invisible to these queries.
+        var reports = v1.MapGroup("/reports").RequireAuthorization(ReportPolicy).InTenantOf(http => Report(http).OrganizationId)
+            .WithTags("Reports").ProducesErrors(404);
 
         reports.MapGet("/organizations/{organizationId:guid}", async (Guid organizationId, HttpContext http, CloudDb db, CancellationToken ct) =>
         {

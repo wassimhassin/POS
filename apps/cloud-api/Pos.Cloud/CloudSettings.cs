@@ -32,6 +32,9 @@ internal static class CloudSettings
 {
     public const string RuntimeDb = "POS_CLOUD_DB";
     public const string MigrationDb = "POS_CLOUD_MIGRATION_DB";
+
+    /// <summary>Platform operations (provisioning CLI): a role that bypasses row-level security. Defaults to <see cref="MigrationDb"/>.</summary>
+    public const string AdminDb = "POS_CLOUD_ADMIN_DB";
     public const string CertificatePassword = "POS_CLOUD_CERT_PASSWORD";
     public const string PublicOrigin = "POS_CLOUD_PUBLIC_ORIGIN";
     public const string MailDirectory = "POS_CLOUD_MAIL_DIR";
@@ -71,7 +74,7 @@ internal static class CloudSettings
             }
         }
 
-        var connectionString = ValidateConnectionString(environment(RuntimeDb), environment(MigrationDb), errors, warnings);
+        var connectionString = ValidateConnectionString(environment(RuntimeDb), [(MigrationDb, environment(MigrationDb)), (AdminDb, environment(AdminDb))], errors, warnings);
         var certificate = LoadCertificate(options.One("certificate"), environment(CertificatePassword), now, errors, warnings);
         var auth = LoadAuth(environment, errors);
 
@@ -230,7 +233,7 @@ internal static class CloudSettings
         }
     }
 
-    private static string? ValidateConnectionString(string? runtime, string? migration, List<string> errors, List<string> warnings)
+    private static string? ValidateConnectionString(string? runtime, (string Name, string? Value)[] privileged, List<string> errors, List<string> warnings)
     {
         if (string.IsNullOrWhiteSpace(runtime))
         {
@@ -263,19 +266,20 @@ internal static class CloudSettings
             warnings.Add($"{RuntimeDb} : « Include Error Detail » est activé ; les journaux peuvent contenir des données.");
         }
 
-        if (!string.IsNullOrWhiteSpace(migration))
+        // The service never runs as a role that owns the schema or bypasses row-level security (doc 15).
+        foreach (var (name, value) in privileged.Where(p => !string.IsNullOrWhiteSpace(p.Value)))
         {
             try
             {
-                var owner = new NpgsqlConnectionStringBuilder(migration);
-                if (!string.IsNullOrEmpty(builder.Username) && string.Equals(owner.Username, builder.Username, StringComparison.Ordinal))
+                var other = new NpgsqlConnectionStringBuilder(value);
+                if (!string.IsNullOrEmpty(builder.Username) && string.Equals(other.Username, builder.Username, StringComparison.Ordinal))
                 {
-                    errors.Add($"{RuntimeDb} : le service doit utiliser un rôle de données distinct du propriétaire du schéma ({MigrationDb}).");
+                    errors.Add($"{RuntimeDb} : le service doit utiliser un rôle de données distinct du rôle privilégié ({name}).");
                 }
             }
             catch (Exception ex) when (ex is ArgumentException or FormatException or KeyNotFoundException)
             {
-                warnings.Add($"{MigrationDb} : chaîne de connexion illisible (ignorée par « run »).");
+                warnings.Add($"{name} : chaîne de connexion illisible (ignorée par « run »).");
             }
         }
 

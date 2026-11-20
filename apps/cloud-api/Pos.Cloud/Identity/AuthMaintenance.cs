@@ -163,10 +163,8 @@ public static class AuthRetention
         do
         {
             // Accepted or revoked invitations expire within 72 h of creation, so expiry bounds every state.
-            deleted = await db.Database.ExecuteSqlAsync($"""
-                DELETE FROM membership_invitations WHERE id IN (
-                    SELECT id FROM membership_invitations WHERE expires_at < {invitationCutoff} LIMIT {BatchSize})
-                """, ct);
+            // Cross-tenant maintenance through one narrow privileged function (the runtime role sees no tenant rows here).
+            deleted = await db.PurgeExpiredInvitationsAsync(invitationCutoff, BatchSize, ct);
             invitations += deleted;
         }
         while (deleted == BatchSize && ++batches < MaxBatchesPerRun);

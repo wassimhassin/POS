@@ -455,11 +455,10 @@ public sealed partial class AuthService(
     {
         ArgumentNullException.ThrowIfNull(principal);
         var user = await db.Users.AsNoTracking().SingleAsync(u => u.Id == principal.UserId, ct);
-        var memberships = await db.OrganizationMemberships.AsNoTracking()
-            .Where(m => m.UserId == user.Id && m.RevokedAt == null)
+        var memberships = (await db.UserMembershipsAsync(user.Id, ct))
             .OrderBy(m => m.CreatedAt)
             .Select(m => new MembershipInfo(m.OrganizationId.ToString(), m.Role))
-            .ToListAsync(ct);
+            .ToList();
         var mfaEnabled = await MfaEnabledAsync(user.Id, ct);
         return new MeResponse(user.Id.ToString("D"), user.Email!, user.EmailConfirmed, mfaEnabled, memberships.Count > 0,
             mfaEnabled ? await RemainingRecoveryCodesAsync(user.Id, ct) : 0, memberships);
@@ -511,7 +510,7 @@ public sealed partial class AuthService(
     public async Task<DateTimeOffset> InviteOwnerAsync(Guid organizationId, string email, CancellationToken ct)
     {
         var address = ValidEmail(email);
-        if (!await db.Organizations.AnyAsync(o => o.Id == organizationId, ct))
+        if (!await db.InTenantAsync(organizationId, () => db.Organizations.AnyAsync(o => o.Id == organizationId, ct), ct))
         {
             throw new CliException("Organisation introuvable.");
         }
@@ -541,8 +540,8 @@ public sealed partial class AuthService(
             throw new CloudException(403, AuthErrors.MfaRequired, "Activez l'authentification à deux facteurs avant d'accepter l'invitation.");
         }
 
-        var organizationId = row.OrganizationId!.Value;
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var organizationId = row.OrganizationId!.Value; // from the server-side token row, never from the request
+        await using var tx = await db.BeginTenantAsync(organizationId, ct);
         if (await ConsumeTokenAsync(token, TokenPurposes.OwnerInvite, ct) is null)
         {
             throw InvalidToken();
@@ -719,8 +718,8 @@ public sealed partial class AuthService(
     private Task<bool> MfaEnabledAsync(Guid userId, CancellationToken ct) =>
         db.UserMfa.AnyAsync(m => m.UserId == userId && m.EnabledAt != null, ct);
 
-    private Task<bool> IsPrivilegedAsync(Guid userId, CancellationToken ct) =>
-        db.OrganizationMemberships.AnyAsync(m => m.UserId == userId && m.RevokedAt == null, ct);
+    private async Task<bool> IsPrivilegedAsync(Guid userId, CancellationToken ct) =>
+        (await db.UserMembershipsAsync(userId, ct)).Count > 0;
 
     private async Task FailedAttemptAsync(CloudUser user, string auditEvent, HttpContext http, Guid? sessionId, CancellationToken ct)
     {
@@ -752,6 +751,17 @@ public sealed partial class AuthService(
 
     private async Task AuditAsync(string auditEvent, HttpContext? http, Guid? userId, Guid? sessionId = null, Guid? organizationId = null, CancellationToken ct = default)
     {
+        if (organizationId is { } organization)
+        {
+            // An organization's row of the security log is written inside that tenant (row-level security).
+            await db.InTenantAsync(organization, () =>
+            {
+                AuthAudit.Add(db, time, auditEvent, http, userId, sessionId, organizationId);
+                return db.SaveChangesAsync(ct);
+            }, ct);
+            return;
+        }
+
         AuthAudit.Add(db, time, auditEvent, http, userId, sessionId, organizationId);
         await db.SaveChangesAsync(ct);
     }

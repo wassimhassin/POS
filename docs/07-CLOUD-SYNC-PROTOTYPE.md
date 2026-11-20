@@ -195,6 +195,7 @@ $env:POS_CLOUD_DATA_KEYS     = "<output of Pos.Cloud data-key-new, after data_ke
 $cloud = "apps\cloud-api\Pos.Cloud\bin\Debug\net10.0\Pos.Cloud.exe"
 & $cloud migrate                     # then GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES ... TO pos_app
                                      # and REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app
+                                     # and GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app (doc 15)
 & $cloud dev-cert --out cloud.pfx --host 127.0.0.1          # prints sha256=<pin>
 & $cloud org-create --name "Groupe"                          # organization_id=...
 & $cloud business-create --org <org> --name "Café"           # business_id=...

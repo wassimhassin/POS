@@ -109,6 +109,7 @@ public sealed class PostgresCluster
         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app;
         REVOKE INSERT, UPDATE, DELETE ON "__EFMigrationsHistory" FROM pos_app;
         REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app;
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app;
         """);
 
     public void Execute(string database, string sql)

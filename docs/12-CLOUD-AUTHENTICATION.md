@@ -41,6 +41,7 @@ owner role like every migration (ADR-010). After migrating, grant the runtime ro
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO pos_app;
 REVOKE INSERT, UPDATE, DELETE ON "__EFMigrationsHistory" FROM pos_app;
 REVOKE UPDATE, DELETE ON auth_audit_events FROM pos_app;   -- checked by check-config
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pos_app; -- tenant functions (Phase 2.1E, doc 15)
 ```
 
 ---
@@ -157,8 +158,8 @@ registration) were fixed in Phase 2.1C: see [doc 13](13-SECURITY-RELIABILITY-HAR
 4. **No breached-password check** (k-anonymity range API or local list), and **no WebAuthn/passkeys** (TOTP only).
 5. **Rate limits are per process**, in memory. Several instances need a shared limiter or an edge limiter.
    `RemoteIpAddress` assumes no reverse proxy: behind a proxy, forwarded headers must be configured with known proxies.
-6. **No RLS.** Roles, scopes and the membership API arrived in Phase 2.1D ([doc 14](14-CLOUD-ACCESS-CONTROL.md)).
-   PostgreSQL RLS is still planned.
+6. Roles, scopes and the membership API arrived in Phase 2.1D ([doc 14](14-CLOUD-ACCESS-CONTROL.md)); PostgreSQL RLS in
+   Phase 2.1E ([doc 15](15-CLOUD-ROW-LEVEL-SECURITY.md)).
 7. **Email change and account deletion** are not implemented.
 8. Lockout lets an attacker lock a known account for 15 minutes (the usual trade-off). Per-IP limits slow this down
    but do not prevent it.
